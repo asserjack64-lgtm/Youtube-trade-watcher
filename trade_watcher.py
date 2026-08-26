@@ -33,10 +33,15 @@ def send_telegram(message):
 
 
 def check_live():
-    options = {
-        "quiet": True,
-        "skip_download": True
+       options = {
+    "quiet": True,
+    "skip_download": True,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["tv", "web_safari"]
+        }
     }
+} 
 
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
