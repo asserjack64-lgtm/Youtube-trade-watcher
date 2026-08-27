@@ -329,29 +329,37 @@ def analyze(df):
 
 def main():
 
-    print(
-        "BTC Liquidity Bot started"
-    )
+    print("BTC Liquidity Bot started")
 
     df = get_data()
 
     signal = analyze(df)
 
     if signal is None:
-
-        print(
-            "No liquidity sweep detected."
-        )
-
+        print("No liquidity sweep detected.")
         return
 
     direction = signal["direction"]
+    level = signal["level"]
+    price = signal["price"]
+    signal_time = str(signal["time"])
 
-    emoji = (
-        "🔴"
-        if direction == "BEARISH"
-        else "🟢"
-    )
+    # Persistent duplicate protection
+    state_file = "last_alert.txt"
+
+    try:
+        with open(state_file, "r") as f:
+            last_alert = f.read().strip()
+    except FileNotFoundError:
+        last_alert = ""
+
+    event_id = f"{signal_time}|{direction}|{level:.2f}"
+
+    if event_id == last_alert:
+        print("Duplicate signal - alert skipped.")
+        return
+
+    emoji = "🔴" if direction == "BEARISH" else "🟢"
 
     message = f"""
 {emoji} BTC LIQUIDITY EVENT
@@ -359,16 +367,16 @@ def main():
 Direction: {direction}
 
 Liquidity level:
-${signal["level"]:,.2f}
+${level:,.2f}
 
 Current price:
-${signal["price"]:,.2f}
+${price:,.2f}
 
 Volume:
 {signal["volume_ratio"]:.2f}x average
 
 Time:
-{signal["time"]}
+{signal_time}
 
 ⚠️ Liquidity sweep detected.
 Wait for manual confirmation.
@@ -378,6 +386,11 @@ Wait for manual confirmation.
 
     print(message)
 
+    # Remember this exact event
+    with open(state_file, "w") as f:
+        f.write(event_id)
+
 
 if __name__ == "__main__":
+    main()
     main()
