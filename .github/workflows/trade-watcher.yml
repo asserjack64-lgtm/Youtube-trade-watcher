@@ -61,7 +61,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add trade_state.json trade_history.json report_state.json
+          # Add any state files that actually exist.
+          git add -A trade_state.json trade_history.json report_state.json 2>/dev/null || true
 
           if git diff --cached --quiet; then
             echo "No state changes to save."
