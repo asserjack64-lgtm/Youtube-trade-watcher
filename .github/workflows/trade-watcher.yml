@@ -1,15 +1,10 @@
 name: BTC Liquidity Monitor
 
 on:
-
   workflow_dispatch:
 
   schedule:
     - cron: "*/5 * * * *"
-
-    # 23:55 IST = 18:25 UTC
-    - cron: "25 18 * * *"
-
 
 jobs:
 
@@ -27,24 +22,17 @@ jobs:
         with:
           fetch-depth: 0
 
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install requests pandas matplotlib
 
-
-      # ======================================================
-      # NORMAL 5-MINUTE BOT
-      # ======================================================
-
       - name: Run bot
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/5 * * * *'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -52,43 +40,37 @@ jobs:
         run: |
           python -u Bot.py
 
-
-      # ======================================================
-      # DAILY EOD REPORT
-      # ======================================================
-
-      - name: Daily EOD Report
-        if: github.event.schedule == '25 18 * * *'
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          EOD_REPORT: "1"
-
+      - name: Save bot state and history
         run: |
-          python -u Bot.py
-
-
-      # ======================================================
-      # SAVE STATE
-      # ======================================================
-
-      - name: Save bot state
-        run: |
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if [ -f trade_state.json ]; then
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
             git add trade_state.json
+
           fi
 
-          if [ -f trade_log.json ]; then
-            git add trade_log.json
+
+          if [ -f trade_history.json ]; then
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add trade_history.json
+
           fi
+
 
           if git diff --cached --quiet; then
-            echo "No state changes to save."
+
+            echo "No state/history changes to save."
+
           else
+
             git commit -m "Update paper trade state"
+
             git push
+
           fi
