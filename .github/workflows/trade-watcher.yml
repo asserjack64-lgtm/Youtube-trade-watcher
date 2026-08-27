@@ -25,21 +25,38 @@ jobs:
         run: |
           pip install requests pandas
 
+      - name: Test Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+
+          url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+          response = requests.post(
+              url,
+              data={
+                  "chat_id": chat_id,
+                  "text": "🟢 BTC Liquidity Monitor Telegram test"
+              },
+              timeout=20
+          )
+
+          print("Telegram status:", response.status_code)
+          print("Telegram response:", response.text)
+
+          response.raise_for_status()
+          PY
+
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python bot.py
-
-      - name: Save alert state
-        run: |
-          if [ -f last_alert.txt ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add last_alert.txt
-            git diff --cached --quiet || git commit -m "Update alert state"
-            git push
-          else
-            echo "No new alert state to save."
-          fi
