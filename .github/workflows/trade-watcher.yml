@@ -72,11 +72,22 @@ jobs:
       - name: Save trade state
         run: |
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f trade_state.json ]; then
 
-          git add trade_state.json
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git diff --cached --quiet || git commit -m "Update trade state"
+            git add trade_state.json
 
-          git push
+            if git diff --cached --quiet; then
+              echo "No trade state changes to save."
+            else
+              git commit -m "Update trade state"
+              git push
+            fi
+
+          else
+
+            echo "No trade state file created. No new trade signal."
+
+          fi
