@@ -1,105 +1,383 @@
 import os
 import time
 import requests
-import yt_dlp
+import pandas as pd
 
-YOUTUBE_URL = "https://www.youtube.com/live/v4zl0bkeIco"
+# ==============================
+# SETTINGS
+# ==============================
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+SYMBOL = "BTCUSDT"
+INTERVAL = "5m"
 
+CANDLES = 200
 
-def send_telegram(message):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("Telegram credentials are not configured.")
-        return
+SWING_LOOKBACK = 3
+ZONE_TOLERANCE = 0.0015
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+SWEEP_PCT = 0.0005
+VOLUME_MULTIPLIER = 1.5
 
-    try:
-        response = requests.post(
-            url,
-            data={
-                "chat_id": CHAT_ID,
-                "text": message
-            },
-            timeout=20
-        )
+CONFIRM_CANDLES = 4
 
-        print("Telegram:", response.status_code)
-
-    except Exception as error:
-        print("Telegram error:", error)
+# Don't repeatedly alert the same event
+COOLDOWN_MINUTES = 30
 
 
-def check_live():
-    options = {
-        "quiet": True,
-        "skip_download": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["tv", "web_safari"]
-            }
-        }
+# ==============================
+# TELEGRAM
+# ==============================
+
+BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+
+
+def telegram(message):
+
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{BOT_TOKEN}/sendMessage"
+    )
+
+    data = {
+        "chat_id": CHAT_ID,
+        "text": message
     }
 
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(
-                YOUTUBE_URL,
-                download=False
+    r = requests.post(
+        url,
+        data=data,
+        timeout=20
+    )
+
+    r.raise_for_status()
+
+
+# ==============================
+# BINANCE DATA
+# ==============================
+
+def get_data():
+
+    url = (
+        "https://api.binance.com/api/v3/klines"
+    )
+
+    params = {
+        "symbol": SYMBOL,
+        "interval": INTERVAL,
+        "limit": CANDLES
+    }
+
+    r = requests.get(
+        url,
+        params=params,
+        timeout=20
+    )
+
+    r.raise_for_status()
+
+    data = r.json()
+
+    columns = [
+        "time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "quote_volume",
+        "trades",
+        "taker_buy_volume",
+        "taker_buy_quote_volume",
+        "unused"
+    ]
+
+    df = pd.DataFrame(
+        data,
+        columns=columns
+    )
+
+    numeric = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]
+
+    for col in numeric:
+        df[col] = pd.to_numeric(
+            df[col]
+        )
+
+    df["time"] = pd.to_datetime(
+        df["time"],
+        unit="ms",
+        utc=True
+    )
+
+    return df
+
+
+# ==============================
+# FIND SWINGS
+# ==============================
+
+def find_swings(df):
+
+    highs = []
+    lows = []
+
+    n = SWING_LOOKBACK
+
+    for i in range(
+        n,
+        len(df) - n
+    ):
+
+        high = df.iloc[i]["high"]
+        low = df.iloc[i]["low"]
+
+        left_high = df.iloc[
+            i-n:i
+        ]["high"].max()
+
+        right_high = df.iloc[
+            i+1:i+n+1
+        ]["high"].max()
+
+        left_low = df.iloc[
+            i-n:i
+        ]["low"].min()
+
+        right_low = df.iloc[
+            i+1:i+n+1
+        ]["low"].min()
+
+        if (
+            high > left_high
+            and
+            high >= right_high
+        ):
+            highs.append(high)
+
+        if (
+            low < left_low
+            and
+            low <= right_low
+        ):
+            lows.append(low)
+
+    return highs, lows
+
+
+# ==============================
+# CLUSTER LEVELS
+# ==============================
+
+def cluster(levels):
+
+    zones = []
+
+    for price in levels:
+
+        found = False
+
+        for zone in zones:
+
+            if (
+                abs(price - zone)
+                / zone
+                <= ZONE_TOLERANCE
+            ):
+
+                zones.remove(zone)
+
+                zones.append(
+                    (zone + price) / 2
+                )
+
+                found = True
+                break
+
+        if not found:
+            zones.append(price)
+
+    return zones
+
+
+# ==============================
+# ANALYZE
+# ==============================
+
+def analyze(df):
+
+    # Ignore currently forming candle
+    df = df.iloc[:-1].copy()
+
+    if len(df) < 50:
+        return None
+
+    highs, lows = find_swings(df)
+
+    high_zones = cluster(highs)
+    low_zones = cluster(lows)
+
+    last = df.iloc[-1]
+
+    previous = df.iloc[-2]
+
+    price = last["close"]
+
+    avg_volume = (
+        df["volume"]
+        .iloc[-21:-1]
+        .mean()
+    )
+
+    # =================================
+    # CHECK BUY-SIDE LIQUIDITY
+    # =================================
+
+    for level in high_zones:
+
+        if level <= price:
+            continue
+
+        distance = (
+            level - price
+        ) / price
+
+        if distance > 0.003:
+            continue
+
+        swept = (
+            last["high"]
+            >
+            level * (1 + SWEEP_PCT)
+        )
+
+        reclaimed = (
+            last["close"] < level
+        )
+
+        if swept and reclaimed:
+
+            volume_ratio = (
+                last["volume"]
+                / avg_volume
             )
 
-        return (
-            info.get("is_live", False),
-            info.get("title", "Unknown stream")
+            return {
+                "direction": "BEARISH",
+                "level": level,
+                "price": price,
+                "volume_ratio": volume_ratio,
+                "time": last["time"]
+            }
+
+
+    # =================================
+    # CHECK SELL-SIDE LIQUIDITY
+    # =================================
+
+    for level in low_zones:
+
+        if level >= price:
+            continue
+
+        distance = (
+            price - level
+        ) / price
+
+        if distance > 0.003:
+            continue
+
+        swept = (
+            last["low"]
+            <
+            level * (1 - SWEEP_PCT)
         )
 
-    except Exception as error:
-        print("YouTube check error:", error)
-        return False, None
-
-
-print("================================")
-print("       TRADE WATCHER")
-print("================================")
-print("YouTube:", YOUTUBE_URL)
-print("Waiting for stream...\n")
-
-last_status = False
-
-while True:
-
-    is_live, title = check_live()
-
-    if is_live and not last_status:
-
-        print("🟢 STREAM IS LIVE!")
-        print("Title:", title)
-
-        send_telegram(
-            "🟢 TRADE WATCHER\n\n"
-            "YouTube stream is LIVE!\n\n"
-            f"{title}\n\n"
-            "Watching for trade entries."
+        reclaimed = (
+            last["close"] > level
         )
 
-    elif not is_live and last_status:
+        if swept and reclaimed:
 
-        print("🔴 STREAM ENDED")
+            volume_ratio = (
+                last["volume"]
+                / avg_volume
+            )
 
-        send_telegram(
-            "🔴 TRADE WATCHER\n\n"
-            "The YouTube stream has ended."
+            return {
+                "direction": "BULLISH",
+                "level": level,
+                "price": price,
+                "volume_ratio": volume_ratio,
+                "time": last["time"]
+            }
+
+    return None
+
+
+# ==============================
+# MAIN
+# ==============================
+
+def main():
+
+    print(
+        "BTC Liquidity Bot started"
+    )
+
+    df = get_data()
+
+    signal = analyze(df)
+
+    if signal is None:
+
+        print(
+            "No liquidity sweep detected."
         )
 
-    else:
+        return
 
-        if is_live:
-            print("🟢 LIVE")
-        else:
-            print("⚫ Offline")
+    direction = signal["direction"]
 
-    last_status = is_live
+    emoji = (
+        "🔴"
+        if direction == "BEARISH"
+        else "🟢"
+    )
 
-    time.sleep(60)
+    message = f"""
+{emoji} BTC LIQUIDITY EVENT
+
+Direction: {direction}
+
+Liquidity level:
+${signal["level"]:,.2f}
+
+Current price:
+${signal["price"]:,.2f}
+
+Volume:
+{signal["volume_ratio"]:.2f}x average
+
+Time:
+{signal["time"]}
+
+⚠️ Liquidity sweep detected.
+Wait for manual confirmation.
+"""
+
+    telegram(message)
+
+    print(message)
+
+
+if __name__ == "__main__":
+    main()
