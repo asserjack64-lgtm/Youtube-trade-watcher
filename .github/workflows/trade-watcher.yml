@@ -34,8 +34,12 @@ jobs:
 
       - name: Save alert state
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add last_alert.txt
-          git diff --cached --quiet || git commit -m "Update alert state"
-          git push
+          if [ -f last_alert.txt ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add last_alert.txt
+            git diff --cached --quiet || git commit -m "Update alert state"
+            git push
+          else
+            echo "No new alert state to save."
+          fi
