@@ -633,11 +633,26 @@ def main():
     # --------------------------------------------------------
 
     if direction == "BEARISH":
-        emoji = "🔴"
-    else:
-        emoji = "🟢"
+    emoji = "🔴"
 
-    message = f"""
+    entry = price
+    stop_loss = level
+    risk = abs(entry - stop_loss)
+
+    tp1 = entry - risk
+    tp2 = entry - (risk * 2)
+
+else:
+    emoji = "🟢"
+
+    entry = price
+    stop_loss = level
+    risk = abs(entry - stop_loss)
+
+    tp1 = entry + risk
+    tp2 = entry + (risk * 2)
+
+message = f"""
 {emoji} BTC LIQUIDITY EVENT
 
 Direction: {direction}
@@ -645,7 +660,7 @@ Direction: {direction}
 Liquidity level:
 ${level:,.2f}
 
-Price:
+Current price:
 ${price:,.2f}
 
 Sweep volume:
@@ -660,8 +675,27 @@ Confirmation:
 Confirmed at:
 {confirmation_time}
 
-⚠️ Liquidity sweep confirmed.
-Wait for manual trade confirmation.
+━━━━━━━━━━━━━━━━━━
+
+📍 Reference Entry:
+${entry:,.2f}
+
+🛑 Reference Stop Loss:
+${stop_loss:,.2f}
+
+🎯 Reference TP1:
+${tp1:,.2f}
+
+🎯 Reference TP2:
+${tp2:,.2f}
+
+📊 Risk/Reward:
+1:1 → TP1
+1:2 → TP2
+
+⚠️ MANUAL TRADE
+Liquidity sweep confirmed.
+Review the setup before entering.
 """
 
     telegram(message)
