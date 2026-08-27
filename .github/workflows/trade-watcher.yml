@@ -6,6 +6,10 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
+    # 23:55 UTC = 05:25 AM IST
+    # Daily report will be sent at this time.
+    - cron: "55 23 * * *"
+
 jobs:
 
   monitor:
@@ -31,36 +35,6 @@ jobs:
         run: |
           pip install requests pandas matplotlib
 
-      - name: Test Telegram
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-        run: |
-          python - <<'PY'
-          import os
-          import requests
-
-          token = os.environ["TELEGRAM_BOT_TOKEN"]
-          chat_id = os.environ["TELEGRAM_CHAT_ID"]
-
-          url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-          response = requests.post(
-              url,
-              data={
-                  "chat_id": chat_id,
-                  "text": "🟢 BTC Liquidity Monitor Telegram test"
-              },
-              timeout=20
-          )
-
-          print("Telegram status:", response.status_code)
-          print("Telegram response:", response.text)
-
-          response.raise_for_status()
-          PY
-
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -69,25 +43,29 @@ jobs:
         run: |
           python -u Bot.py
 
-      - name: Save trade state
+      - name: Daily EOD Report
+        if: github.event_name == 'schedule' && github.event.schedule == '55 23 * * *'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+        run: |
+          python - <<'PY'
+          import Bot
+          Bot.send_daily_report()
+          PY
+
+      - name: Save bot state
         run: |
 
-          if [ -f trade_state.json ]; then
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add trade_state.json trade_history.json report_state.json
 
-            git add trade_state.json
-
-            if git diff --cached --quiet; then
-              echo "No trade state changes to save."
-            else
-              git commit -m "Update trade state"
-              git push
-            fi
-
+          if git diff --cached --quiet; then
+            echo "No state changes to save."
           else
-
-            echo "No trade state file created. No new trade signal."
-
+            git commit -m "Update paper trading state"
+            git push
           fi
