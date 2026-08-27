@@ -1,34 +1,29 @@
-name: Trade Watcher
+name: BTC Liquidity Monitor
 
 on:
   workflow_dispatch:
 
 jobs:
-  watch:
+  monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Install Python packages
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install playwright requests
+          pip install requests pandas
 
-      - name: Install Chromium
-        run: |
-          playwright install --with-deps chromium
-
-      - name: Start Browser Watcher
+      - name: Run bot
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python youtube_browser.py
+          python bot.py
