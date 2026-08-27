@@ -78,18 +78,17 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          if [ -f trade_state.json ]; then
+            git add trade_state.json
+          fi
 
-          git add trade_state.json trade_log.json
-
+          if [ -f trade_log.json ]; then
+            git add trade_log.json
+          fi
 
           if git diff --cached --quiet; then
-
             echo "No state changes to save."
-
           else
-
             git commit -m "Update paper trade state"
-
             git push
-
           fi
