@@ -1,7 +1,7 @@
 import os
-import time
 import requests
 import pandas as pd
+import matplotlib.pyplot as plt
 
 
 # ============================================================
@@ -16,29 +16,38 @@ SWING_LOOKBACK = 3
 ZONE_TOLERANCE = 0.001
 
 SWEEP_PCT = 0.0005
-VOLUME_MULTIPLIER = 1.2
+VOLUME_MULTIPLIER = 1.5
 
 CONFIRM_CANDLES = 2
 COOLDOWN_MINUTES = 30
 
 STATE_FILE = "last_alert.txt"
+CHART_FILE = "btc_liquidity_setup.png"
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM SETTINGS
 # ============================================================
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 
+# ============================================================
+# SEND TELEGRAM TEXT
+# ============================================================
+
 def telegram(message):
 
     if not BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is missing"
+        )
 
     if not CHAT_ID:
-        raise RuntimeError("TELEGRAM_CHAT_ID is missing")
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID is missing"
+        )
 
     url = (
         f"https://api.telegram.org/bot"
@@ -62,12 +71,58 @@ def telegram(message):
 
 
 # ============================================================
-# BINANCE DATA
+# SEND TELEGRAM CHART
+# ============================================================
+
+def send_chart(chart_file, message):
+
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is missing"
+        )
+
+    if not CHAT_ID:
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID is missing"
+        )
+
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{BOT_TOKEN}/sendPhoto"
+    )
+
+    with open(
+        chart_file,
+        "rb"
+    ) as photo:
+
+        response = requests.post(
+            url,
+            data={
+                "chat_id": CHAT_ID,
+                "caption": message
+            },
+            files={
+                "photo": photo
+            },
+            timeout=30
+        )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+# ============================================================
+# GET BINANCE DATA
 # ============================================================
 
 def get_data():
 
-    url = "https://data-api.binance.vision/api/v3/klines"
+    url = (
+        "https://data-api.binance.vision/"
+        "api/v3/klines"
+    )
 
     params = {
         "symbol": SYMBOL,
@@ -105,7 +160,7 @@ def get_data():
         columns=columns
     )
 
-    numeric = [
+    numeric_columns = [
         "open",
         "high",
         "low",
@@ -113,9 +168,10 @@ def get_data():
         "volume"
     ]
 
-    for col in numeric:
-        df[col] = pd.to_numeric(
-            df[col],
+    for column in numeric_columns:
+
+        df[column] = pd.to_numeric(
+            df[column],
             errors="coerce"
         )
 
@@ -147,36 +203,61 @@ def find_swings(df):
         len(df) - n
     ):
 
-        high = df.iloc[i]["high"]
-        low = df.iloc[i]["low"]
+        high = float(
+            df.iloc[i]["high"]
+        )
 
-        left_high = df.iloc[
-            i - n:i
-        ]["high"].max()
+        low = float(
+            df.iloc[i]["low"]
+        )
 
-        right_high = df.iloc[
-            i + 1:i + n + 1
-        ]["high"].max()
+        left_high = float(
+            df.iloc[
+                i - n:i
+            ]["high"].max()
+        )
 
-        left_low = df.iloc[
-            i - n:i
-        ]["low"].min()
+        right_high = float(
+            df.iloc[
+                i + 1:i + n + 1
+            ]["high"].max()
+        )
 
-        right_low = df.iloc[
-            i + 1:i + n + 1
-        ]["low"].min()
+        left_low = float(
+            df.iloc[
+                i - n:i
+            ]["low"].min()
+        )
+
+        right_low = float(
+            df.iloc[
+                i + 1:i + n + 1
+            ]["low"].min()
+        )
 
         if (
             high > left_high
             and high >= right_high
         ):
-            highs.append(float(high))
+
+            highs.append(
+                {
+                    "index": i,
+                    "price": high
+                }
+            )
 
         if (
             low < left_low
             and low <= right_low
         ):
-            lows.append(float(low))
+
+            lows.append(
+                {
+                    "index": i,
+                    "price": low
+                }
+            )
 
     return highs, lows
 
@@ -189,9 +270,14 @@ def cluster(levels):
 
     zones = []
 
-    for price in levels:
+    for item in levels:
 
-        price = float(price)
+        if isinstance(item, dict):
+            price = float(
+                item["price"]
+            )
+        else:
+            price = float(item)
 
         found = False
 
@@ -210,16 +296,18 @@ def cluster(levels):
                 )
 
                 found = True
+
                 break
 
         if not found:
+
             zones.append(price)
 
     return zones
 
 
 # ============================================================
-# CHECK FOR LIQUIDITY SWEEP
+# FIND LIQUIDITY SWEEP
 # ============================================================
 
 def find_sweep(
@@ -231,7 +319,7 @@ def find_sweep(
     if index < 30:
         return None
 
-    # Only use candles BEFORE the sweep.
+    # Only candles BEFORE the sweep.
     history = df.iloc[:index].copy()
 
     highs, lows = find_swings(history)
@@ -241,14 +329,15 @@ def find_sweep(
 
     candle = df.iloc[index]
 
-    price = float(candle["close"])
+    price = float(
+        candle["close"]
+    )
 
 
-    # --------------------------------------------------------
-    # BUY-SIDE LIQUIDITY
-    # Price runs above previous highs and closes back below.
-    # This creates a bearish setup.
-    # --------------------------------------------------------
+    # ========================================================
+    # BEARISH SETUP
+    # Price sweeps previous high and closes below it.
+    # ========================================================
 
     if direction == "BEARISH":
 
@@ -280,11 +369,10 @@ def find_sweep(
                 return float(level)
 
 
-    # --------------------------------------------------------
-    # SELL-SIDE LIQUIDITY
-    # Price runs below previous lows and closes back above.
-    # This creates a bullish setup.
-    # --------------------------------------------------------
+    # ========================================================
+    # BULLISH SETUP
+    # Price sweeps previous low and closes above it.
+    # ========================================================
 
     if direction == "BULLISH":
 
@@ -319,7 +407,7 @@ def find_sweep(
 
 
 # ============================================================
-# CONFIRMATION
+# CHECK CONFIRMATION
 # ============================================================
 
 def check_confirmation(
@@ -329,7 +417,10 @@ def check_confirmation(
     direction
 ):
 
-    end = sweep_index + CONFIRM_CANDLES
+    end = (
+        sweep_index
+        + CONFIRM_CANDLES
+    )
 
     if end >= len(df):
         return False
@@ -338,28 +429,40 @@ def check_confirmation(
         sweep_index + 1:end + 1
     ]
 
+
     if direction == "BEARISH":
 
         for _, candle in confirmation.iterrows():
 
-            if float(candle["close"]) >= level:
+            if (
+                float(candle["close"])
+                >= level
+            ):
+
                 return False
 
     else:
 
         for _, candle in confirmation.iterrows():
 
-            if float(candle["close"]) <= level:
+            if (
+                float(candle["close"])
+                <= level
+            ):
+
                 return False
 
     return True
 
 
 # ============================================================
-# VOLUME CHECK
+# VOLUME RATIO
 # ============================================================
 
-def volume_ratio(df, index):
+def volume_ratio(
+    df,
+    index
+):
 
     start = max(
         0,
@@ -379,13 +482,15 @@ def volume_ratio(df, index):
         return 0
 
     return (
-        float(df.iloc[index]["volume"])
+        float(
+            df.iloc[index]["volume"]
+        )
         / float(average)
     )
 
 
 # ============================================================
-# FIND MOST RECENT CONFIRMED SIGNAL
+# ANALYZE DATA
 # ============================================================
 
 def analyze(df):
@@ -400,10 +505,11 @@ def analyze(df):
     if len(df) < minimum:
         return None
 
-    # Search from newest possible confirmed event backwards.
+
     latest_index = len(df) - 1
 
     first_index = 30
+
 
     for confirmation_end in range(
         latest_index,
@@ -420,9 +526,9 @@ def analyze(df):
             continue
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # BEARISH
-        # ----------------------------------------------------
+        # ====================================================
 
         bearish_level = find_sweep(
             df,
@@ -437,14 +543,19 @@ def analyze(df):
                 sweep_index
             )
 
-            if ratio >= VOLUME_MULTIPLIER:
+            if (
+                ratio
+                >= VOLUME_MULTIPLIER
+            ):
 
-                if check_confirmation(
+                confirmed = check_confirmation(
                     df,
                     sweep_index,
                     bearish_level,
                     "BEARISH"
-                ):
+                )
+
+                if confirmed:
 
                     return {
                         "direction": "BEARISH",
@@ -469,9 +580,9 @@ def analyze(df):
                     }
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # BULLISH
-        # ----------------------------------------------------
+        # ====================================================
 
         bullish_level = find_sweep(
             df,
@@ -486,14 +597,19 @@ def analyze(df):
                 sweep_index
             )
 
-            if ratio >= VOLUME_MULTIPLIER:
+            if (
+                ratio
+                >= VOLUME_MULTIPLIER
+            ):
 
-                if check_confirmation(
+                confirmed = check_confirmation(
                     df,
                     sweep_index,
                     bullish_level,
                     "BULLISH"
-                ):
+                )
+
+                if confirmed:
 
                     return {
                         "direction": "BULLISH",
@@ -521,7 +637,7 @@ def analyze(df):
 
 
 # ============================================================
-# STATE / DUPLICATE PROTECTION
+# LOAD LAST ALERT
 # ============================================================
 
 def load_state():
@@ -540,6 +656,10 @@ def load_state():
         return ""
 
 
+# ============================================================
+# SAVE LAST ALERT
+# ============================================================
+
 def save_state(event_id):
 
     with open(
@@ -551,20 +671,387 @@ def save_state(event_id):
 
 
 # ============================================================
+# CREATE CHART
+# ============================================================
+
+def create_chart(
+    df,
+    signal,
+    entry,
+    stop_loss,
+    tp1,
+    tp2
+):
+
+    chart_df = (
+        df.tail(60)
+        .copy()
+        .reset_index(drop=True)
+    )
+
+
+    direction = signal["direction"]
+
+    liquidity_level = float(
+        signal["level"]
+    )
+
+
+    fig, ax = plt.subplots(
+        figsize=(14, 8)
+    )
+
+
+    # ========================================================
+    # CANDLESTICKS
+    # ========================================================
+
+    for i, candle in chart_df.iterrows():
+
+        open_price = float(
+            candle["open"]
+        )
+
+        high_price = float(
+            candle["high"]
+        )
+
+        low_price = float(
+            candle["low"]
+        )
+
+        close_price = float(
+            candle["close"]
+        )
+
+
+        if close_price >= open_price:
+
+            candle_color = "green"
+
+        else:
+
+            candle_color = "red"
+
+
+        # Wick
+
+        ax.plot(
+            [i, i],
+            [
+                low_price,
+                high_price
+            ],
+            color=candle_color,
+            linewidth=1
+        )
+
+
+        # Body
+
+        body_low = min(
+            open_price,
+            close_price
+        )
+
+        body_height = abs(
+            close_price
+            - open_price
+        )
+
+
+        if body_height == 0:
+
+            body_height = (
+                high_price
+                * 0.00001
+            )
+
+
+        ax.bar(
+            i,
+            body_height,
+            bottom=body_low,
+            width=0.65,
+            color=candle_color
+        )
+
+
+    # ========================================================
+    # LIQUIDITY LEVEL
+    # ========================================================
+
+    ax.axhline(
+        liquidity_level,
+        linestyle="--",
+        linewidth=2,
+        label=(
+            f"Liquidity "
+            f"${liquidity_level:,.2f}"
+        )
+    )
+
+
+    # ========================================================
+    # ENTRY
+    # ========================================================
+
+    ax.axhline(
+        entry,
+        linestyle="-",
+        linewidth=2,
+        label=(
+            f"Entry "
+            f"${entry:,.2f}"
+        )
+    )
+
+
+    # ========================================================
+    # STOP LOSS
+    # ========================================================
+
+    ax.axhline(
+        stop_loss,
+        linestyle="--",
+        linewidth=2,
+        label=(
+            f"Stop Loss "
+            f"${stop_loss:,.2f}"
+        )
+    )
+
+
+    # ========================================================
+    # TP1
+    # ========================================================
+
+    ax.axhline(
+        tp1,
+        linestyle="--",
+        linewidth=2,
+        label=(
+            f"TP1 "
+            f"${tp1:,.2f}"
+        )
+    )
+
+
+    # ========================================================
+    # TP2
+    # ========================================================
+
+    ax.axhline(
+        tp2,
+        linestyle="--",
+        linewidth=2,
+        label=(
+            f"TP2 "
+            f"${tp2:,.2f}"
+        )
+    )
+
+
+    # ========================================================
+    # FIND TRENDLINE
+    # ========================================================
+
+    highs, lows = find_swings(
+        chart_df
+    )
+
+
+    if direction == "BULLISH":
+
+        if len(lows) >= 2:
+
+            p1 = lows[-2]
+            p2 = lows[-1]
+
+            x1 = p1["index"]
+            x2 = p2["index"]
+
+            y1 = p1["price"]
+            y2 = p2["price"]
+
+            # Extend trendline to latest candle.
+
+            if x2 != x1:
+
+                slope = (
+                    y2 - y1
+                ) / (
+                    x2 - x1
+                )
+
+                x3 = len(chart_df) - 1
+
+                y3 = (
+                    y2
+                    + slope
+                    * (x3 - x2)
+                )
+
+                ax.plot(
+                    [x1, x2, x3],
+                    [y1, y2, y3],
+                    linewidth=3,
+                    label="Bullish trendline"
+                )
+
+
+    else:
+
+        if len(highs) >= 2:
+
+            p1 = highs[-2]
+            p2 = highs[-1]
+
+            x1 = p1["index"]
+            x2 = p2["index"]
+
+            y1 = p1["price"]
+            y2 = p2["price"]
+
+            # Extend trendline to latest candle.
+
+            if x2 != x1:
+
+                slope = (
+                    y2 - y1
+                ) / (
+                    x2 - x1
+                )
+
+                x3 = len(chart_df) - 1
+
+                y3 = (
+                    y2
+                    + slope
+                    * (x3 - x2)
+                )
+
+                ax.plot(
+                    [x1, x2, x3],
+                    [y1, y2, y3],
+                    linewidth=3,
+                    label="Bearish trendline"
+                )
+
+
+    # ========================================================
+    # MARK SWEEP CANDLE
+    # ========================================================
+
+    sweep_time = signal["time"]
+
+    sweep_rows = chart_df[
+        chart_df["time"] == sweep_time
+    ]
+
+    if not sweep_rows.empty:
+
+        sweep_index = int(
+            sweep_rows.index[0]
+        )
+
+        sweep_price = float(
+            chart_df.iloc[
+                sweep_index
+            ]["close"]
+        )
+
+        ax.scatter(
+            sweep_index,
+            sweep_price,
+            s=120,
+            marker="*",
+            zorder=5,
+            label="Liquidity sweep"
+        )
+
+
+    # ========================================================
+    # TITLE
+    # ========================================================
+
+    ax.set_title(
+        (
+            f"BTCUSDT 5m "
+            f"Liquidity Sweep — "
+            f"{direction}"
+        ),
+        fontsize=16,
+        fontweight="bold"
+    )
+
+
+    ax.set_xlabel(
+        "Candles"
+    )
+
+    ax.set_ylabel(
+        "Price (USDT)"
+    )
+
+
+    ax.grid(
+        True,
+        alpha=0.2
+    )
+
+
+    ax.legend(
+        loc="best",
+        fontsize=9
+    )
+
+
+    plt.tight_layout()
+
+
+    plt.savefig(
+        CHART_FILE,
+        dpi=150,
+        bbox_inches="tight"
+    )
+
+
+    plt.close()
+
+
+    return CHART_FILE
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
 
-    print("BTC Liquidity Bot started")
+    print(
+        "BTC Liquidity Bot started"
+    )
+
+
+    # ========================================================
+    # GET DATA
+    # ========================================================
 
     df = get_data()
+
 
     print(
         f"Loaded {len(df)} candles"
     )
 
+
+    # ========================================================
+    # ANALYZE
+    # ========================================================
+
     signal = analyze(df)
+
 
     if signal is None:
 
@@ -575,13 +1062,21 @@ def main():
         return
 
 
-    direction = signal["direction"]
+    direction = signal[
+        "direction"
+    ]
 
-    level = signal["level"]
+    level = signal[
+        "level"
+    ]
 
-    price = signal["price"]
+    price = signal[
+        "price"
+    ]
 
-    volume = signal["volume_ratio"]
+    volume = signal[
+        "volume_ratio"
+    ]
 
 
     signal_time = str(
@@ -593,6 +1088,10 @@ def main():
     )
 
 
+    # ========================================================
+    # EVENT ID
+    # ========================================================
+
     event_id = (
         f"{signal_time}|"
         f"{direction}|"
@@ -603,36 +1102,43 @@ def main():
     last_alert = load_state()
 
 
-    # --------------------------------------------------------
-    # EXACT DUPLICATE PROTECTION
-    # --------------------------------------------------------
+    # ========================================================
+    # DUPLICATE PROTECTION
+    # ========================================================
 
     if event_id == last_alert:
 
         print(
-            "Duplicate signal - alert skipped."
+            "Duplicate signal - "
+            "alert skipped."
         )
 
         return
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # COOLDOWN
-    # --------------------------------------------------------
+    # ========================================================
 
     if last_alert:
 
         try:
 
-            previous_time = pd.to_datetime(
-                last_alert.split("|")[0],
-                utc=True
+            previous_time = (
+                pd.to_datetime(
+                    last_alert.split("|")[0],
+                    utc=True
+                )
             )
 
-            current_time = pd.to_datetime(
-                signal_time,
-                utc=True
+
+            current_time = (
+                pd.to_datetime(
+                    signal_time,
+                    utc=True
+                )
             )
+
 
             minutes = (
                 current_time
@@ -642,7 +1148,8 @@ def main():
 
             if (
                 minutes >= 0
-                and minutes < COOLDOWN_MINUTES
+                and
+                minutes < COOLDOWN_MINUTES
             ):
 
                 print(
@@ -652,14 +1159,15 @@ def main():
 
                 return
 
+
         except Exception:
 
             pass
 
 
-    # --------------------------------------------------------
-    # TELEGRAM MESSAGE
-    # --------------------------------------------------------
+    # ========================================================
+    # ENTRY / STOP / TARGETS
+    # ========================================================
 
     if direction == "BEARISH":
 
@@ -670,12 +1178,20 @@ def main():
         stop_loss = level
 
         risk = abs(
-            entry - stop_loss
+            entry
+            - stop_loss
         )
 
-        tp1 = entry - risk
+        tp1 = (
+            entry
+            - risk
+        )
 
-        tp2 = entry - (risk * 2)
+        tp2 = (
+            entry
+            - (risk * 2)
+        )
+
 
     else:
 
@@ -686,13 +1202,24 @@ def main():
         stop_loss = level
 
         risk = abs(
-            entry - stop_loss
+            entry
+            - stop_loss
         )
 
-        tp1 = entry + risk
+        tp1 = (
+            entry
+            + risk
+        )
 
-        tp2 = entry + (risk * 2)
+        tp2 = (
+            entry
+            + (risk * 2)
+        )
 
+
+    # ========================================================
+    # TELEGRAM MESSAGE
+    # ========================================================
 
     message = f"""
 {emoji} BTC LIQUIDITY EVENT
@@ -742,17 +1269,78 @@ Review the setup before entering.
 """
 
 
-    telegram(message)
+    # ========================================================
+    # CREATE CHART
+    # ========================================================
 
-    print(message)
+    chart_file = create_chart(
+        df,
+        signal,
+        entry,
+        stop_loss,
+        tp1,
+        tp2
+    )
 
-
-    # Save only AFTER successful Telegram delivery.
-
-    save_state(event_id)
 
     print(
-        "Alert sent and state saved."
+        "Chart created."
+    )
+
+
+    # ========================================================
+    # SEND TEXT MESSAGE
+    # ========================================================
+
+    telegram(message)
+
+
+    print(
+        "Telegram text alert sent."
+    )
+
+
+    # ========================================================
+    # SEND CHART
+    # ========================================================
+
+    chart_caption = (
+        f"{emoji} BTC "
+        f"{direction} SETUP\n\n"
+        f"Entry: ${entry:,.2f}\n"
+        f"Stop Loss: ${stop_loss:,.2f}\n"
+        f"TP1: ${tp1:,.2f}\n"
+        f"TP2: ${tp2:,.2f}\n\n"
+        f"Volume: {volume:.2f}x average\n\n"
+        f"⚠️ Manual trade setup\n"
+        f"Review before entering."
+    )
+
+
+    send_chart(
+        chart_file,
+        chart_caption
+    )
+
+
+    print(
+        "Chart sent to Telegram."
+    )
+
+
+    # ========================================================
+    # SAVE STATE
+    # ONLY AFTER BOTH MESSAGES SUCCEED
+    # ========================================================
+
+    save_state(
+        event_id
+    )
+
+
+    print(
+        "Alert sent, chart sent "
+        "and state saved."
     )
 
 
@@ -761,4 +1349,5 @@ Review the setup before entering.
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
