@@ -8,14 +8,12 @@ on:
 
 jobs:
   monitor:
-
     runs-on: ubuntu-latest
 
     permissions:
       contents: write
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -35,13 +33,11 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
         run: |
           python -u Bot.py
 
-      - name: Save state and history
+      - name: Save bot state and history
         run: |
-
           if [ -f trade_state.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
