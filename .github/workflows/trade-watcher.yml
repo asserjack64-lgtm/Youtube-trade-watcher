@@ -1,4 +1,4 @@
-name: BTC Liquidity Monitor
+name: BTC Liquidity Monitor Test
 
 on:
   workflow_dispatch:
