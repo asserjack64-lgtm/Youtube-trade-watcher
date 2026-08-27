@@ -3,6 +3,9 @@ name: BTC Liquidity Monitor
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "3-59/5 * * * *"
+
 jobs:
   monitor:
 
