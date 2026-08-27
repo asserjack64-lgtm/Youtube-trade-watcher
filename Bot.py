@@ -243,6 +243,7 @@ def find_sweep(
 
     price = float(candle["close"])
 
+
     # --------------------------------------------------------
     # BUY-SIDE LIQUIDITY
     # Price runs above previous highs and closes back below.
@@ -277,6 +278,7 @@ def find_sweep(
             if swept and reclaimed:
 
                 return float(level)
+
 
     # --------------------------------------------------------
     # SELL-SIDE LIQUIDITY
@@ -417,6 +419,7 @@ def analyze(df):
         if sweep_index < first_index:
             continue
 
+
         # ----------------------------------------------------
         # BEARISH
         # ----------------------------------------------------
@@ -445,18 +448,26 @@ def analyze(df):
 
                     return {
                         "direction": "BEARISH",
+
                         "level": bearish_level,
+
                         "price": float(
-                            df.iloc[confirmation_end]["close"]
+                            df.iloc[
+                                confirmation_end
+                            ]["close"]
                         ),
+
                         "volume_ratio": ratio,
+
                         "time": df.iloc[
                             sweep_index
                         ]["time"],
+
                         "confirmation_time": df.iloc[
                             confirmation_end
                         ]["time"]
                     }
+
 
         # ----------------------------------------------------
         # BULLISH
@@ -486,14 +497,21 @@ def analyze(df):
 
                     return {
                         "direction": "BULLISH",
+
                         "level": bullish_level,
+
                         "price": float(
-                            df.iloc[confirmation_end]["close"]
+                            df.iloc[
+                                confirmation_end
+                            ]["close"]
                         ),
+
                         "volume_ratio": ratio,
+
                         "time": df.iloc[
                             sweep_index
                         ]["time"],
+
                         "confirmation_time": df.iloc[
                             confirmation_end
                         ]["time"]
@@ -556,10 +574,15 @@ def main():
 
         return
 
+
     direction = signal["direction"]
+
     level = signal["level"]
+
     price = signal["price"]
+
     volume = signal["volume_ratio"]
+
 
     signal_time = str(
         signal["time"]
@@ -569,13 +592,16 @@ def main():
         signal["confirmation_time"]
     )
 
+
     event_id = (
         f"{signal_time}|"
         f"{direction}|"
         f"{level:.2f}"
     )
 
+
     last_alert = load_state()
+
 
     # --------------------------------------------------------
     # EXACT DUPLICATE PROTECTION
@@ -588,6 +614,7 @@ def main():
         )
 
         return
+
 
     # --------------------------------------------------------
     # COOLDOWN
@@ -612,6 +639,7 @@ def main():
                 - previous_time
             ).total_seconds() / 60
 
+
             if (
                 minutes >= 0
                 and minutes < COOLDOWN_MINUTES
@@ -628,31 +656,45 @@ def main():
 
             pass
 
+
     # --------------------------------------------------------
     # TELEGRAM MESSAGE
     # --------------------------------------------------------
 
     if direction == "BEARISH":
-    emoji = "🔴"
 
-    entry = price
-    stop_loss = level
-    risk = abs(entry - stop_loss)
+        emoji = "🔴"
 
-    tp1 = entry - risk
-    tp2 = entry - (risk * 2)
+        entry = price
 
-else:
-    emoji = "🟢"
+        stop_loss = level
 
-    entry = price
-    stop_loss = level
-    risk = abs(entry - stop_loss)
+        risk = abs(
+            entry - stop_loss
+        )
 
-    tp1 = entry + risk
-    tp2 = entry + (risk * 2)
+        tp1 = entry - risk
 
-message = f"""
+        tp2 = entry - (risk * 2)
+
+    else:
+
+        emoji = "🟢"
+
+        entry = price
+
+        stop_loss = level
+
+        risk = abs(
+            entry - stop_loss
+        )
+
+        tp1 = entry + risk
+
+        tp2 = entry + (risk * 2)
+
+
+    message = f"""
 {emoji} BTC LIQUIDITY EVENT
 
 Direction: {direction}
@@ -694,15 +736,19 @@ ${tp2:,.2f}
 1:2 → TP2
 
 ⚠️ MANUAL TRADE
+
 Liquidity sweep confirmed.
 Review the setup before entering.
 """
+
 
     telegram(message)
 
     print(message)
 
+
     # Save only AFTER successful Telegram delivery.
+
     save_state(event_id)
 
     print(
