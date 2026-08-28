@@ -55,5 +55,24 @@
     "outcome": "SL",
     "result_r": -1,
     "closed_at": "2026-08-28T08:52:23.075674+00:00"
+  },
+  {
+    "event_id": "2026-08-28 13:55:00+00:00|BEARISH|79477.67",
+    "symbol": "BTCUSDT",
+    "direction": "BEARISH",
+    "entry": 78839.55,
+    "stop_loss": 79477.67,
+    "tp1": 78201.43000000001,
+    "tp2": 77563.31000000001,
+    "level": 79477.67,
+    "sweep_time": "2026-08-28 13:55:00+00:00",
+    "confirmation_time": "2026-08-28 14:05:00+00:00",
+    "volume_ratio": 5.00848850823577,
+    "tp1_hit": false,
+    "tp2_hit": false,
+    "sl_hit": true,
+    "outcome": "SL",
+    "result_r": -1,
+    "closed_at": "2026-08-28T14:42:14.654324+00:00"
   }
 ]
