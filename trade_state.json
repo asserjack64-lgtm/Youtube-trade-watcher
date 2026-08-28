@@ -1,6 +1,6 @@
 {
   "active": false,
-  "last_heartbeat": "2026-08-28T20:37:15.542968+00:00",
+  "last_heartbeat": "2026-08-28T21:38:34.810381+00:00",
   "last_processed_event_id": "2026-08-28 14:35:00+00:00|BEARISH|79477.67",
   "event_id": "2026-08-28 14:35:00+00:00|BEARISH|79477.67",
   "direction": "BEARISH",
@@ -14,5 +14,12 @@
   "volume_ratio": 2.719566699729513,
   "tp1_hit": false,
   "tp2_hit": false,
-  "sl_hit": true
+  "sl_hit": true,
+  "original_stop_loss": 0,
+  "range_high": 0,
+  "range_low": 0,
+  "range_width_pct": 0,
+  "reward_r": 0,
+  "breakeven": false,
+  "bars_in_trade": 0
 }
