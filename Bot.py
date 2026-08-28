@@ -23,7 +23,6 @@ VOLUME_MULTIPLIER = 1.5
 CONFIRM_CANDLES = 2
 COOLDOWN_MINUTES = 30
 
-# Send heartbeat at most once every hour.
 HEARTBEAT_MINUTES = 60
 
 STATE_FILE = "trade_state.json"
@@ -606,6 +605,7 @@ def volume_ratio(
 def analyze(df):
 
     # Ignore currently forming candle.
+
     df = df.iloc[
         :-1
     ].copy()
@@ -617,10 +617,6 @@ def analyze(df):
     if len(df) < minimum:
 
         return None
-
-
-    # Only evaluate the newest
-    # completed confirmation.
 
     confirmation_end = (
         len(df) - 1
@@ -772,6 +768,13 @@ def default_state():
 
         "last_heartbeat": "",
 
+        # NEW:
+        # Stores the last setup that was processed.
+        # This prevents the same closed setup from
+        # generating another alert.
+
+        "last_processed_event_id": "",
+
         "event_id": "",
 
         "direction": "",
@@ -821,8 +824,6 @@ def load_state():
             ):
 
                 return default_state()
-
-            # Add missing fields safely.
 
             default = default_state()
 
@@ -910,6 +911,67 @@ def save_history(history):
             f,
             indent=2
         )
+
+
+# ============================================================
+# CHECK IF EVENT WAS ALREADY PROCESSED
+# ============================================================
+
+def event_already_processed(
+    event_id,
+    state
+):
+
+    # --------------------------------------------------------
+    # CHECK CURRENT STATE
+    # --------------------------------------------------------
+
+    if (
+        state.get(
+            "last_processed_event_id",
+            ""
+        )
+        == event_id
+    ):
+
+        return True
+
+
+    # --------------------------------------------------------
+    # CHECK CURRENT / PREVIOUS TRADE
+    # --------------------------------------------------------
+
+    if (
+        state.get(
+            "event_id",
+            ""
+        )
+        == event_id
+    ):
+
+        return True
+
+
+    # --------------------------------------------------------
+    # CHECK TRADE HISTORY
+    # --------------------------------------------------------
+
+    history = load_history()
+
+    for trade in history:
+
+        if (
+            trade.get(
+                "event_id",
+                ""
+            )
+            == event_id
+        ):
+
+            return True
+
+
+    return False
 
 
 # ============================================================
@@ -1137,9 +1199,6 @@ def create_chart(
             else "red"
         )
 
-
-        # Wick
-
         ax.plot(
             [i, i],
             [
@@ -1149,9 +1208,6 @@ def create_chart(
             color=candle_color,
             linewidth=1
         )
-
-
-        # Body
 
         body_low = min(
             open_price,
@@ -1265,28 +1321,23 @@ def create_chart(
     if direction == "BULLISH":
 
         points = lows
-
         label = "Bullish trendline"
 
     else:
 
         points = highs
-
         label = "Bearish trendline"
 
 
     if len(points) >= 2:
 
         p1 = points[-2]
-
         p2 = points[-1]
 
         x1 = p1["index"]
-
         x2 = p2["index"]
 
         y1 = p1["price"]
-
         y2 = p2["price"]
 
         if x2 != x1:
@@ -1456,8 +1507,6 @@ def monitor_trade(
     if direction == "BULLISH":
 
         # Stop loss first.
-        # Conservative assumption if the same candle
-        # touches both SL and TP.
 
         if (
             not state["sl_hit"]
@@ -1688,7 +1737,8 @@ The bearish paper trade is complete.
 
 def create_trade(
     df,
-    signal
+    signal,
+    previous_state
 ):
 
     direction = signal[
@@ -1781,21 +1831,38 @@ def create_trade(
 
         "active": True,
 
-        "last_heartbeat": "",
+        "last_heartbeat":
+            previous_state.get(
+                "last_heartbeat",
+                ""
+            ),
 
-        "event_id": event_id,
+        # IMPORTANT:
+        # Remember this setup permanently in state.
 
-        "direction": direction,
+        "last_processed_event_id":
+            event_id,
 
-        "entry": entry,
+        "event_id":
+            event_id,
 
-        "stop_loss": stop_loss,
+        "direction":
+            direction,
 
-        "tp1": tp1,
+        "entry":
+            entry,
 
-        "tp2": tp2,
+        "stop_loss":
+            stop_loss,
 
-        "level": level,
+        "tp1":
+            tp1,
+
+        "tp2":
+            tp2,
+
+        "level":
+            level,
 
         "sweep_time": str(
             signal["time"]
@@ -1805,7 +1872,8 @@ def create_trade(
             signal["confirmation_time"]
         ),
 
-        "volume_ratio": volume,
+        "volume_ratio":
+            volume,
 
         "tp1_hit": False,
 
@@ -1964,9 +2032,7 @@ def send_eod_report():
         "Generating daily EOD paper-trading report..."
     )
 
-
     history = load_history()
-
 
     now = pd.Timestamp.now(
         tz="UTC"
@@ -1975,7 +2041,6 @@ def send_eod_report():
     today = now.strftime(
         "%Y-%m-%d"
     )
-
 
     today_trades = []
 
@@ -2178,7 +2243,6 @@ without using real money.
         report
     )
 
-
     print(
         "EOD report sent."
     )
@@ -2316,12 +2380,50 @@ def main():
 
 
     # ========================================================
+    # BUILD EVENT ID
+    # ========================================================
+
+    event_id = (
+        f"{signal['time']}|"
+        f"{signal['direction']}|"
+        f"{float(signal['level']):.2f}"
+    )
+
+
+    print(
+        "Signal detected:",
+        event_id
+    )
+
+
+    # ========================================================
+    # DUPLICATE PROTECTION
+    # ========================================================
+
+    if event_already_processed(
+        event_id,
+        state
+    ):
+
+        print(
+            "Signal already processed."
+        )
+
+        print(
+            "No duplicate paper trade will be created."
+        )
+
+        return
+
+
+    # ========================================================
     # CREATE PAPER TRADE
     # ========================================================
 
     new_state = create_trade(
         df,
-        signal
+        signal,
+        state
     )
 
 
