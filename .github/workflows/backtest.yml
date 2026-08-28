@@ -10,11 +10,9 @@ on:
 
 jobs:
   backtest:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -26,18 +24,17 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas requests
+          pip install requests pandas
 
       - name: Run strategy backtest
         run: |
-          python backtests.py --days "${{ inputs.days }}"
+          python backtest.py --days "${{ inputs.days }}"
 
       - name: Upload backtest results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: strategy-backtest-v4-results
+          name: strategy-backtest-results
           path: |
-            backtest_v4_validation_trades.csv
-            backtest_v4_training_trades.csv
-            backtest_v4_training_robustness.csv
+            backtest*.csv
           if-no-files-found: ignore
