@@ -13,22 +13,32 @@ import requests
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 
+# Range = previous 24 completed 5-minute candles
+# = approximately 2 hours.
 RANGE_CANDLES = 24
+
+# Maximum allowed range width.
 MAX_RANGE_WIDTH_PCT = 0.015
 
+# Sweep must move beyond the range by this percentage.
 SWEEP_PCT = 0.0003
+
+# Stop is placed slightly beyond the sweep extreme.
 SL_BUFFER_PCT = 0.0005
 
+# Volume confirmation.
 VOLUME_LOOKBACK = 20
 MIN_VOLUME_RATIO = 1.20
 
+# Confirmation candle body.
 CONFIRM_BODY_MIN_PCT = 0.0005
 
+# Maximum time to hold a paper trade.
 MAX_BARS_IN_TRADE = 72
 
 
 # ============================================================
-# API
+# BINANCE API
 # ============================================================
 
 API_URL = (
@@ -38,12 +48,13 @@ API_URL = (
 
 
 # ============================================================
-# FETCH DATA
+# FETCH HISTORICAL DATA
 # ============================================================
 
 def fetch_klines(start_ms, end_ms):
 
     rows = []
+
     cursor = start_ms
 
     while cursor < end_ms:
@@ -71,7 +82,9 @@ def fetch_klines(start_ms, end_ms):
 
         rows.extend(batch)
 
-        last_open = int(batch[-1][0])
+        last_open = int(
+            batch[-1][0]
+        )
 
         next_cursor = (
             last_open
@@ -112,10 +125,15 @@ def fetch_klines(start_ms, end_ms):
 
 
     if df.empty:
+
         raise RuntimeError(
             "Binance returned no candles."
         )
 
+
+    # --------------------------------------------------------
+    # Convert numerical columns
+    # --------------------------------------------------------
 
     numeric_columns = [
         "open",
@@ -134,6 +152,10 @@ def fetch_klines(start_ms, end_ms):
         )
 
 
+    # --------------------------------------------------------
+    # Convert timestamps
+    # --------------------------------------------------------
+
     df["open_time"] = pd.to_datetime(
         df["open_time"],
         unit="ms",
@@ -148,6 +170,10 @@ def fetch_klines(start_ms, end_ms):
     )
 
 
+    # --------------------------------------------------------
+    # Clean data
+    # --------------------------------------------------------
+
     df = (
         df
         .drop_duplicates("open_time")
@@ -156,7 +182,9 @@ def fetch_klines(start_ms, end_ms):
     )
 
 
-    # Never use the currently forming candle.
+    # --------------------------------------------------------
+    # Never use a currently-forming candle
+    # --------------------------------------------------------
 
     now = pd.Timestamp.now(
         tz="UTC"
@@ -171,10 +199,13 @@ def fetch_klines(start_ms, end_ms):
 
 
 # ============================================================
-# VOLUME
+# VOLUME RATIO
 # ============================================================
 
-def volume_ratio(df, index):
+def volume_ratio(
+    df,
+    index
+):
 
     start = max(
         0,
@@ -187,6 +218,7 @@ def volume_ratio(df, index):
 
 
     if len(previous) < 5:
+
         return 0.0
 
 
@@ -194,6 +226,7 @@ def volume_ratio(df, index):
 
 
     if average <= 0:
+
         return 0.0
 
 
@@ -204,16 +237,36 @@ def volume_ratio(df, index):
 
 
 # ============================================================
-# FIND SIGNAL
+# FIND BEARISH SIGNAL
 # ============================================================
 
-def find_signal(df, i):
+def find_signal(
+    df,
+    i
+):
+
+    """
+    BEARISH-ONLY RANGE LIQUIDITY SWEEP MODEL
+
+    1. Price consolidates inside a range.
+    2. Price sweeps above the range high.
+    3. Sweep candle closes back below the range high.
+    4. Next candle confirms bearish displacement.
+    5. Entry = confirmation candle close.
+    6. Stop = above sweep extreme.
+    7. TP1 = 1R.
+    8. TP2 = opposite side of range, capped at 2R.
+    """
 
     # i = confirmation candle
     # i-1 = sweep candle
 
     sweep_i = i - 1
 
+
+    # --------------------------------------------------------
+    # Ensure enough history
+    # --------------------------------------------------------
 
     if sweep_i < (
         RANGE_CANDLES
@@ -224,7 +277,7 @@ def find_signal(df, i):
 
 
     # --------------------------------------------------------
-    # RANGE
+    # Build previous range
     # --------------------------------------------------------
 
     range_df = df.iloc[
@@ -249,6 +302,7 @@ def find_signal(df, i):
 
 
     if midpoint <= 0:
+
         return None
 
 
@@ -258,6 +312,8 @@ def find_signal(df, i):
     ) / midpoint
 
 
+    # Reject excessively wide ranges.
+
     if (
         range_width_pct
         > MAX_RANGE_WIDTH_PCT
@@ -266,9 +322,18 @@ def find_signal(df, i):
         return None
 
 
+    # --------------------------------------------------------
+    # Sweep candle
+    # --------------------------------------------------------
+
     sweep = df.iloc[
         sweep_i
     ]
+
+
+    # --------------------------------------------------------
+    # Confirmation candle
+    # --------------------------------------------------------
 
     confirm = df.iloc[
         i
@@ -277,10 +342,6 @@ def find_signal(df, i):
 
     sweep_high = float(
         sweep["high"]
-    )
-
-    sweep_low = float(
-        sweep["low"]
     )
 
     sweep_close = float(
@@ -297,6 +358,10 @@ def find_signal(df, i):
     )
 
 
+    # --------------------------------------------------------
+    # Volume
+    # --------------------------------------------------------
+
     vr = volume_ratio(
         df,
         sweep_i
@@ -304,7 +369,7 @@ def find_signal(df, i):
 
 
     # ========================================================
-    # BEARISH
+    # BEARISH LIQUIDITY SWEEP
     # ========================================================
 
     bearish_sweep = (
@@ -321,6 +386,10 @@ def find_signal(df, i):
         range_high
     )
 
+
+    # ========================================================
+    # BEARISH CONFIRMATION
+    # ========================================================
 
     bearish_confirmation = (
 
@@ -354,236 +423,133 @@ def find_signal(df, i):
     )
 
 
-    if (
+    # --------------------------------------------------------
+    # All conditions must pass
+    # --------------------------------------------------------
+
+    if not (
         bearish_sweep
         and bearish_confirmation
         and vr >= MIN_VOLUME_RATIO
     ):
 
-        entry = confirm_close
-
-        stop = (
-            sweep_high
-            * (1 + SL_BUFFER_PCT)
-        )
-
-        risk = (
-            stop
-            - entry
-        )
-
-
-        if risk <= 0:
-            return None
-
-
-        tp1 = (
-            entry
-            - risk
-        )
-
-
-        opposite = range_low
-
-
-        tp2 = min(
-            entry - 2 * risk,
-            opposite
-        )
-
-
-        reward = (
-            entry
-            - tp2
-        ) / risk
-
-
-        if reward < 1.5:
-            return None
-
-
-        return {
-
-            "direction": "BEARISH",
-
-            "signal_time":
-                confirm["open_time"],
-
-            "sweep_time":
-                sweep["open_time"],
-
-            "range_high":
-                range_high,
-
-            "range_low":
-                range_low,
-
-            "entry":
-                entry,
-
-            "stop":
-                stop,
-
-            "tp1":
-                tp1,
-
-            "tp2":
-                tp2,
-
-            "planned_reward_r":
-                reward,
-
-            "volume_ratio":
-                vr,
-
-            "range_width_pct":
-                range_width_pct
-        }
+        return None
 
 
     # ========================================================
-    # BULLISH
+    # ENTRY
     # ========================================================
 
-    bullish_sweep = (
+    entry = confirm_close
 
-        sweep_low
-        <
-        range_low
-        * (1 - SWEEP_PCT)
 
-        and
+    # ========================================================
+    # STOP LOSS
+    # ========================================================
 
-        sweep_close
-        >
-        range_low
+    stop = (
+        sweep_high
+        * (1 + SL_BUFFER_PCT)
     )
 
 
-    bullish_confirmation = (
-
-        confirm_close
-        >
-        range_low
-
-        and
-
-        confirm_close
-        >
-        confirm_open
-
-        and
-
-        (
-            confirm_close
-            - confirm_open
-        )
-        / confirm_open
-        >= CONFIRM_BODY_MIN_PCT
-
-        and
-
-        confirm_close
-        >
-        (
-            sweep_low
-            + sweep_close
-        ) / 2
+    risk = (
+        stop
+        - entry
     )
 
 
-    if (
-        bullish_sweep
-        and bullish_confirmation
-        and vr >= MIN_VOLUME_RATIO
-    ):
+    if risk <= 0:
 
-        entry = confirm_close
-
-        stop = (
-            sweep_low
-            * (1 - SL_BUFFER_PCT)
-        )
-
-        risk = (
-            entry
-            - stop
-        )
+        return None
 
 
-        if risk <= 0:
-            return None
+    # ========================================================
+    # TP1
+    # ========================================================
+
+    tp1 = (
+        entry
+        - risk
+    )
 
 
-        tp1 = (
-            entry
-            + risk
-        )
+    # ========================================================
+    # TP2
+    # ========================================================
+
+    opposite = range_low
 
 
-        opposite = range_high
+    tp2 = min(
+        entry - 2 * risk,
+        opposite
+    )
 
 
-        tp2 = max(
-            entry + 2 * risk,
-            opposite
-        )
+    # ========================================================
+    # PLANNED R/R
+    # ========================================================
+
+    planned_reward = (
+        entry
+        - tp2
+    ) / risk
 
 
-        reward = (
-            tp2
-            - entry
-        ) / risk
+    # Need at least 1.5R available.
+
+    if planned_reward < 1.5:
+
+        return None
 
 
-        if reward < 1.5:
-            return None
+    # ========================================================
+    # RETURN SIGNAL
+    # ========================================================
 
+    return {
 
-        return {
+        "direction":
+            "BEARISH",
 
-            "direction": "BULLISH",
+        "signal_time":
+            confirm["open_time"],
 
-            "signal_time":
-                confirm["open_time"],
+        "sweep_time":
+            sweep["open_time"],
 
-            "sweep_time":
-                sweep["open_time"],
+        "range_high":
+            range_high,
 
-            "range_high":
-                range_high,
+        "range_low":
+            range_low,
 
-            "range_low":
-                range_low,
+        "entry":
+            entry,
 
-            "entry":
-                entry,
+        "stop":
+            stop,
 
-            "stop":
-                stop,
+        "tp1":
+            tp1,
 
-            "tp1":
-                tp1,
+        "tp2":
+            tp2,
 
-            "tp2":
-                tp2,
+        "planned_reward_r":
+            planned_reward,
 
-            "planned_reward_r":
-                reward,
+        "volume_ratio":
+            vr,
 
-            "volume_ratio":
-                vr,
-
-            "range_width_pct":
-                range_width_pct
-        }
-
-
-    return None
+        "range_width_pct":
+            range_width_pct
+    }
 
 
 # ============================================================
-# SIMULATE TRADE
+# SIMULATE PAPER TRADE
 # ============================================================
 
 def simulate_trade(
@@ -592,7 +558,9 @@ def simulate_trade(
     signal
 ):
 
-    direction = signal["direction"]
+    direction = signal[
+        "direction"
+    ]
 
     entry = float(
         signal["entry"]
@@ -618,6 +586,10 @@ def simulate_trade(
     bars = 0
 
 
+    # ========================================================
+    # WALK FORWARD THROUGH FUTURE CANDLES
+    # ========================================================
+
     for j in range(
         entry_i + 1,
         len(df)
@@ -625,7 +597,10 @@ def simulate_trade(
 
         bars += 1
 
-        candle = df.iloc[j]
+        candle = df.iloc[
+            j
+        ]
+
 
         high = float(
             candle["high"]
@@ -641,81 +616,29 @@ def simulate_trade(
 
 
         # ====================================================
-        # BULLISH
+        # BEARISH TRADE
         # ====================================================
 
-        if direction == "BULLISH":
+        if direction == "BEARISH":
 
-            # Conservative:
-            # SL is checked before targets.
-
-            if low <= stop:
-
-                return {
-
-                    "outcome": "SL",
-
-                    "r": -1.0,
-
-                    "close_time":
-                        candle["close_time"],
-
-                    "bars":
-                        bars,
-
-                    "tp1_hit":
-                        tp1_hit,
-
-                    "tp1_bar":
-                        tp1_bar
-                }
-
-
-            if (
-                not tp1_hit
-                and high >= tp1
-            ):
-
-                tp1_hit = True
-
-                tp1_bar = bars
-
-
-            if high >= tp2:
-
-                return {
-
-                    "outcome": "TP2",
-
-                    "r": 2.0,
-
-                    "close_time":
-                        candle["close_time"],
-
-                    "bars":
-                        bars,
-
-                    "tp1_hit":
-                        True,
-
-                    "tp1_bar":
-                        tp1_bar
-                }
-
-
-        # ====================================================
-        # BEARISH
-        # ====================================================
-
-        else:
+            # ------------------------------------------------
+            # STOP LOSS
+            # ------------------------------------------------
+            #
+            # Conservative assumption:
+            # if stop and target are both touched
+            # on the same candle, SL is counted first.
+            #
 
             if high >= stop:
 
                 return {
 
-                    "outcome": "SL",
+                    "outcome":
+                        "SL",
 
-                    "r": -1.0,
+                    "r":
+                        -1.0,
 
                     "close_time":
                         candle["close_time"],
@@ -730,6 +653,10 @@ def simulate_trade(
                         tp1_bar
                 }
 
+
+            # ------------------------------------------------
+            # TP1
+            # ------------------------------------------------
 
             if (
                 not tp1_hit
@@ -741,13 +668,19 @@ def simulate_trade(
                 tp1_bar = bars
 
 
+            # ------------------------------------------------
+            # TP2
+            # ------------------------------------------------
+
             if low <= tp2:
 
                 return {
 
-                    "outcome": "TP2",
+                    "outcome":
+                        "TP2",
 
-                    "r": 2.0,
+                    "r":
+                        2.0,
 
                     "close_time":
                         candle["close_time"],
@@ -769,24 +702,17 @@ def simulate_trade(
 
         if bars >= MAX_BARS_IN_TRADE:
 
-            if direction == "BULLISH":
+            risk = (
+                stop
+                - entry
+            )
 
-                risk = (
-                    entry
-                    - stop
-                )
 
-                r = (
-                    close
-                    - entry
-                ) / risk
+            if risk <= 0:
+
+                r = 0.0
 
             else:
-
-                risk = (
-                    stop
-                    - entry
-                )
 
                 r = (
                     entry
@@ -796,9 +722,11 @@ def simulate_trade(
 
             return {
 
-                "outcome": "TIME",
+                "outcome":
+                    "TIME",
 
-                "r": float(r),
+                "r":
+                    float(r),
 
                 "close_time":
                     candle["close_time"],
@@ -815,7 +743,7 @@ def simulate_trade(
 
 
     # ========================================================
-    # OPEN AT END
+    # OPEN AT END OF DATA
     # ========================================================
 
     return {
@@ -823,7 +751,8 @@ def simulate_trade(
         "outcome":
             "OPEN_AT_END",
 
-        "r": 0.0,
+        "r":
+            0.0,
 
         "close_time":
             df.iloc[-1]["close_time"],
@@ -843,9 +772,12 @@ def simulate_trade(
 # RUN BACKTEST
 # ============================================================
 
-def run_backtest(df):
+def run_backtest(
+    df
+):
 
     trades = []
+
 
     i = (
         RANGE_CANDLES
@@ -892,7 +824,9 @@ def run_backtest(df):
         )
 
 
+        # ----------------------------------------------------
         # Prevent overlapping trades.
+        # ----------------------------------------------------
 
         exit_i = (
             i
@@ -923,22 +857,36 @@ def summarize(
     if trades.empty:
 
         print(
-            "\nNO TRADES FOUND."
+            "\n"
+            + "=" * 65
+        )
+
+        print(
+            "NO TRADES FOUND"
+        )
+
+        print(
+            "=" * 65
+        )
+
+        print(
+            "The bearish filters may be "
+            "too strict for this period."
         )
 
         return
 
+
+    # ========================================================
+    # BASIC COUNTS
+    # ========================================================
 
     total = len(
         trades
     )
 
 
-    # --------------------------------------------------------
-    # OUTCOMES
-    # --------------------------------------------------------
-
-    tp2 = int(
+    tp2_wins = int(
         (
             trades["outcome"]
             == "TP2"
@@ -946,7 +894,7 @@ def summarize(
     )
 
 
-    sl = int(
+    stop_losses = int(
         (
             trades["outcome"]
             == "SL"
@@ -962,13 +910,17 @@ def summarize(
     )
 
 
-    open_end = int(
+    open_at_end = int(
         (
             trades["outcome"]
             == "OPEN_AT_END"
         ).sum()
     )
 
+
+    # ========================================================
+    # TP1
+    # ========================================================
 
     tp1_hits = int(
         trades["tp1_hit"].sum()
@@ -984,9 +936,9 @@ def summarize(
     )
 
 
-    # --------------------------------------------------------
-    # R
-    # --------------------------------------------------------
+    # ========================================================
+    # R VALUES
+    # ========================================================
 
     r_values = (
         trades["r"]
@@ -999,10 +951,14 @@ def summarize(
     )
 
 
-    avg_r = float(
+    average_r = float(
         r_values.mean()
     )
 
+
+    # ========================================================
+    # PROFIT FACTOR
+    # ========================================================
 
     gross_profit = float(
         r_values[
@@ -1034,9 +990,9 @@ def summarize(
         )
 
 
-    # --------------------------------------------------------
-    # EQUITY / DRAWDOWN
-    # --------------------------------------------------------
+    # ========================================================
+    # EQUITY CURVE
+    # ========================================================
 
     equity = (
         r_values
@@ -1061,13 +1017,13 @@ def summarize(
     )
 
 
-    # --------------------------------------------------------
-    # TIME EXIT CONTRIBUTION
-    # --------------------------------------------------------
+    # ========================================================
+    # R CONTRIBUTION
+    # ========================================================
 
-    time_r = float(
+    tp2_r = float(
         trades.loc[
-            trades["outcome"] == "TIME",
+            trades["outcome"] == "TP2",
             "r"
         ].sum()
     )
@@ -1081,11 +1037,18 @@ def summarize(
     )
 
 
-    tp2_r = float(
+    time_r = float(
         trades.loc[
-            trades["outcome"] == "TP2",
+            trades["outcome"] == "TIME",
             "r"
         ].sum()
+    )
+
+
+    total_check = (
+        tp2_r
+        + sl_r
+        + time_r
     )
 
 
@@ -1099,8 +1062,8 @@ def summarize(
     )
 
     print(
-        "BTCUSDT 5m RANGE LIQUIDITY"
-        " SWEEP BACKTEST"
+        "BTCUSDT 5m BEARISH-ONLY "
+        "RANGE LIQUIDITY BACKTEST"
     )
 
     print(
@@ -1113,10 +1076,12 @@ def summarize(
         f"{df_start} → {df_end}"
     )
 
+
     print(
         f"Candles:             "
         f"{len(df):,}"
     )
+
 
     print(
         f"Trades:              "
@@ -1124,35 +1089,44 @@ def summarize(
     )
 
 
+    # ========================================================
+    # OUTCOMES
+    # ========================================================
+
     print(
         "\nOUTCOMES"
     )
 
+
     print(
         f"TP2 wins:            "
-        f"{tp2}"
+        f"{tp2_wins}"
     )
+
 
     print(
         f"Stop losses:         "
-        f"{sl}"
+        f"{stop_losses}"
     )
+
 
     print(
         f"Time exits:          "
         f"{time_exits}"
     )
 
+
     print(
         f"Open at end:         "
-        f"{open_end}"
+        f"{open_at_end}"
     )
 
 
     print(
-        f"\nTP1 hits:            "
+        f"TP1 hits:            "
         f"{tp1_hits}"
     )
+
 
     print(
         f"TP1 → SL:            "
@@ -1160,29 +1134,38 @@ def summarize(
     )
 
 
+    # ========================================================
+    # PERFORMANCE
+    # ========================================================
+
     print(
         "\nPERFORMANCE"
     )
 
+
     print(
         f"TP2 win rate:        "
-        f"{tp2 / total * 100:.1f}%"
+        f"{tp2_wins / total * 100:.1f}%"
     )
+
 
     print(
         f"Total R:             "
         f"{total_r:+.2f}R"
     )
 
+
     print(
         f"Average R/trade:     "
-        f"{avg_r:+.3f}R"
+        f"{average_r:+.3f}R"
     )
+
 
     print(
         f"Profit factor:       "
         f"{profit_factor:.2f}"
     )
+
 
     print(
         f"Max drawdown:        "
@@ -1190,81 +1173,37 @@ def summarize(
     )
 
 
+    # ========================================================
+    # R CONTRIBUTION
+    # ========================================================
+
     print(
         "\nR CONTRIBUTION"
     )
+
 
     print(
         f"TP2 R:               "
         f"{tp2_r:+.2f}R"
     )
 
+
     print(
         f"SL R:                "
         f"{sl_r:+.2f}R"
     )
+
 
     print(
         f"TIME R:              "
         f"{time_r:+.2f}R"
     )
 
+
     print(
         f"TOTAL R:             "
-        f"{tp2_r + sl_r + time_r:+.2f}R"
+        f"{total_check:+.2f}R"
     )
-
-
-    # ========================================================
-    # DIRECTION
-    # ========================================================
-
-    print(
-        "\nBY DIRECTION"
-    )
-
-
-    for direction in [
-        "BULLISH",
-        "BEARISH"
-    ]:
-
-        subset = trades[
-            trades["direction"]
-            == direction
-        ]
-
-
-        if subset.empty:
-            continue
-
-
-        direction_r = float(
-            subset["r"].sum()
-        )
-
-
-        direction_win = (
-            (
-                subset["outcome"]
-                == "TP2"
-            ).mean()
-            * 100
-        )
-
-
-        direction_tp1 = int(
-            subset["tp1_hit"].sum()
-        )
-
-
-        print(
-            f"{direction:<10}"
-            f" trades={len(subset):4d}"
-            f"  R={direction_r:+8.2f}"
-            f"  TP2 win={direction_win:5.1f}%"
-            f"  TP1={direction_tp1:3d}"
-        )
 
 
     # ========================================================
@@ -1272,13 +1211,25 @@ def summarize(
     # ========================================================
 
     print(
-        "\nVOLUME ANALYSIS"
+        "\nSIGNAL QUALITY"
     )
 
 
     print(
         f"Average sweep volume: "
         f"{trades['volume_ratio'].mean():.2f}x"
+    )
+
+
+    print(
+        f"Minimum sweep volume:  "
+        f"{trades['volume_ratio'].min():.2f}x"
+    )
+
+
+    print(
+        f"Maximum sweep volume:  "
+        f"{trades['volume_ratio'].max():.2f}x"
     )
 
 
@@ -1294,6 +1245,18 @@ def summarize(
     print(
         f"Average range width: "
         f"{trades['range_width_pct'].mean() * 100:.3f}%"
+    )
+
+
+    print(
+        f"Minimum range width: "
+        f"{trades['range_width_pct'].min() * 100:.3f}%"
+    )
+
+
+    print(
+        f"Maximum range width: "
+        f"{trades['range_width_pct'].max() * 100:.3f}%"
     )
 
 
@@ -1333,9 +1296,12 @@ def summarize(
 
 
     available_columns = [
-        c
-        for c in columns
-        if c in trades.columns
+
+        column
+
+        for column in columns
+
+        if column in trades.columns
     ]
 
 
@@ -1350,9 +1316,50 @@ def summarize(
     )
 
 
+    # ========================================================
+    # FINAL CHECK
+    # ========================================================
+
     print(
         "\n"
         + "=" * 65
+    )
+
+
+    print(
+        "ACCOUNTING CHECK"
+    )
+
+
+    print(
+        f"TP2 + SL + TIME = "
+        f"{total_check:+.2f}R"
+    )
+
+
+    print(
+        f"Reported TOTAL R = "
+        f"{total_r:+.2f}R"
+    )
+
+
+    if abs(
+        total_check - total_r
+    ) < 0.000001:
+
+        print(
+            "✓ R accounting is consistent."
+        )
+
+    else:
+
+        print(
+            "⚠ R accounting mismatch detected."
+        )
+
+
+    print(
+        "=" * 65
     )
 
 
@@ -1380,6 +1387,10 @@ def main():
 
     args = parser.parse_args()
 
+
+    # ========================================================
+    # DATE RANGE
+    # ========================================================
 
     end = datetime.now(
         timezone.utc
@@ -1412,6 +1423,10 @@ def main():
     )
 
 
+    # ========================================================
+    # DOWNLOAD
+    # ========================================================
+
     print(
         f"Downloading BTCUSDT 5m "
         f"data for {args.days} days..."
@@ -1419,6 +1434,7 @@ def main():
 
 
     data = fetch_klines(
+
         int(
             start.timestamp()
             * 1000
@@ -1437,10 +1453,18 @@ def main():
     )
 
 
+    # ========================================================
+    # RUN
+    # ========================================================
+
     trades = run_backtest(
         data
     )
 
+
+    # ========================================================
+    # SAVE
+    # ========================================================
 
     if not trades.empty:
 
@@ -1455,6 +1479,10 @@ def main():
             f"{args.output}"
         )
 
+
+    # ========================================================
+    # REPORT
+    # ========================================================
 
     summarize(
         trades,
