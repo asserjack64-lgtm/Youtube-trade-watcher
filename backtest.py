@@ -7,7 +7,7 @@ import requests
 
 
 # ============================================================
-# BASIC SETTINGS
+# SETTINGS
 # ============================================================
 
 SYMBOL = "BTCUSDT"
@@ -17,7 +17,7 @@ API_URL = "https://data-api.binance.vision/api/v3/klines"
 
 
 # ============================================================
-# BASE STRATEGY
+# STRATEGY
 # ============================================================
 
 RANGE_CANDLES = 24
@@ -50,10 +50,28 @@ MOVE_SL_TO_BREAKEVEN = True
 
 
 # ============================================================
-# PARAMETER TESTS
+# BASE CONFIGURATION
+#
+# IMPORTANT:
+# These parameters are FIXED for the validation test.
 # ============================================================
 
-TEST_CONFIGS = [
+BASE_CONFIG = {
+    "name": "BASE",
+    "volume": 1.50,
+    "body": 0.0008,
+    "range": 0.015,
+}
+
+
+# ============================================================
+# TRAINING ROBUSTNESS TESTS
+#
+# These are ONLY tested on the training period.
+# We do NOT use validation data to select parameters.
+# ============================================================
+
+TRAINING_TESTS = [
 
     {
         "name": "BASE",
@@ -100,7 +118,7 @@ TEST_CONFIGS = [
 
 
 # ============================================================
-# DOWNLOAD DATA
+# DOWNLOAD BINANCE DATA
 # ============================================================
 
 def fetch_klines(start_ms, end_ms):
@@ -181,16 +199,13 @@ def fetch_klines(start_ms, end_ms):
         )
 
 
-    numeric_columns = [
+    for column in [
         "open",
         "high",
         "low",
         "close",
         "volume",
-    ]
-
-
-    for column in numeric_columns:
+    ]:
 
         df[column] = pd.to_numeric(
             df[column],
@@ -220,7 +235,7 @@ def fetch_klines(start_ms, end_ms):
     )
 
 
-    # Never use the currently forming candle.
+    # Never use a forming candle.
 
     now = pd.Timestamp.now(
         tz="UTC"
@@ -235,7 +250,7 @@ def fetch_klines(start_ms, end_ms):
 
 
 # ============================================================
-# VOLUME
+# VOLUME RATIO
 # ============================================================
 
 def volume_ratio(
@@ -283,6 +298,7 @@ def find_signal(
     config,
 ):
 
+    # i = confirmation candle
     sweep_i = i - 1
 
 
@@ -295,7 +311,7 @@ def find_signal(
 
 
     # --------------------------------------------------------
-    # RANGE
+    # RANGE BEFORE SWEEP
     # --------------------------------------------------------
 
     range_df = df.iloc[
@@ -337,7 +353,7 @@ def find_signal(
 
 
     # --------------------------------------------------------
-    # SWEEP CANDLE
+    # SWEEP
     # --------------------------------------------------------
 
     sweep = df.iloc[
@@ -354,10 +370,6 @@ def find_signal(
         sweep["close"]
     )
 
-
-    # --------------------------------------------------------
-    # BEARISH LIQUIDITY SWEEP
-    # --------------------------------------------------------
 
     bearish_sweep = (
 
@@ -397,7 +409,7 @@ def find_signal(
 
 
     # --------------------------------------------------------
-    # CONFIRMATION CANDLE
+    # CONFIRMATION
     # --------------------------------------------------------
 
     confirm = df.iloc[
@@ -415,7 +427,7 @@ def find_signal(
     )
 
 
-    bearish_body = (
+    body_pct = (
         confirm_open
         - confirm_close
     ) / confirm_open
@@ -435,7 +447,7 @@ def find_signal(
 
         and
 
-        bearish_body
+        body_pct
         >= config["body"]
 
         and
@@ -461,7 +473,7 @@ def find_signal(
     entry = confirm_close
 
 
-    # SL goes beyond actual sweep high.
+    # Stop above actual sweep extreme.
 
     stop = (
         sweep_high
@@ -488,10 +500,7 @@ def find_signal(
 
     tp1 = (
         entry
-        - (
-            risk
-            * TP1_R
-        )
+        - risk * TP1_R
     )
 
 
@@ -501,20 +510,12 @@ def find_signal(
 
     theoretical_tp2 = (
         entry
-        - (
-            risk
-            * TP2_R
-        )
+        - risk * TP2_R
     )
 
 
-    # Opposite side of range.
-
     opposite_range = range_low
 
-
-    # We require the range target to offer
-    # at least 1.5R.
 
     range_reward_r = (
         entry
@@ -522,13 +523,15 @@ def find_signal(
     ) / risk
 
 
+    # Require at least 1.5R potential.
+
     if range_reward_r < 1.5:
 
         return None
 
 
-    # Use the nearer of 2R and opposite
-    # range target.
+    # Do not pretend we can get more than
+    # the available range target.
 
     tp2 = max(
         theoretical_tp2,
@@ -536,13 +539,13 @@ def find_signal(
     )
 
 
-    actual_reward_r = (
+    planned_reward_r = (
         entry
         - tp2
     ) / risk
 
 
-    if actual_reward_r < 1.5:
+    if planned_reward_r < 1.5:
 
         return None
 
@@ -583,7 +586,7 @@ def find_signal(
             range_width,
 
         "planned_reward_r":
-            actual_reward_r,
+            planned_reward_r,
     }
 
 
@@ -626,9 +629,6 @@ def simulate_trade(
 
     bars = 0
 
-
-    # Track realized and remaining R.
-
     realized_r = 0.0
 
     remaining_fraction = 1.0
@@ -653,9 +653,9 @@ def simulate_trade(
         )
 
 
-        # ====================================================
-        # STOP
-        # ====================================================
+        # ----------------------------------------------------
+        # CURRENT STOP
+        # ----------------------------------------------------
 
         current_stop = (
             entry
@@ -664,30 +664,29 @@ def simulate_trade(
         )
 
 
-        if high >= current_stop:
+        # ----------------------------------------------------
+        # STOP
+        # ----------------------------------------------------
 
-            # If TP1 already occurred, remaining
-            # 50% closes at breakeven.
+        if high >= current_stop:
 
             if tp1_hit:
 
-                # Remaining 50% = 0R.
-
                 final_r = realized_r
+
+                outcome = "TP1_BE"
 
             else:
 
-                # Entire position loses 1R.
-
                 final_r = -1.0
+
+                outcome = "SL"
 
 
             return {
 
                 "outcome":
-                    "SL"
-                    if not tp1_hit
-                    else "TP1_SL",
+                    outcome,
 
                 "r":
                     final_r,
@@ -709,9 +708,9 @@ def simulate_trade(
             }
 
 
-        # ====================================================
+        # ----------------------------------------------------
         # TP1
-        # ====================================================
+        # ----------------------------------------------------
 
         if (
             not tp1_hit
@@ -721,7 +720,7 @@ def simulate_trade(
             tp1_hit = True
 
 
-            # 50% position closes at 1R.
+            # 50% position gets +1R.
 
             realized_r += (
                 TP1_PARTIAL
@@ -740,9 +739,9 @@ def simulate_trade(
                 breakeven = True
 
 
-        # ====================================================
+        # ----------------------------------------------------
         # TP2
-        # ====================================================
+        # ----------------------------------------------------
 
         if low <= tp2:
 
@@ -783,9 +782,9 @@ def simulate_trade(
             }
 
 
-        # ====================================================
+        # ----------------------------------------------------
         # TIME EXIT
-        # ====================================================
+        # ----------------------------------------------------
 
         if bars >= MAX_BARS_IN_TRADE:
 
@@ -843,9 +842,9 @@ def simulate_trade(
             }
 
 
-    # ========================================================
-    # END OF DATA
-    # ========================================================
+    # --------------------------------------------------------
+    # DATASET ENDED
+    # --------------------------------------------------------
 
     return {
 
@@ -879,6 +878,8 @@ def simulate_trade(
 def run_backtest(
     df,
     config,
+    start_time=None,
+    end_time=None,
 ):
 
     trades = []
@@ -907,11 +908,63 @@ def run_backtest(
             continue
 
 
+        entry_time = df.iloc[
+            i
+        ]["open_time"]
+
+
+        # ----------------------------------------------------
+        # OUT-OF-SAMPLE FILTER
+        #
+        # The signal calculation still has access to the
+        # historical candles before validation.
+        #
+        # But trades are only accepted inside the requested
+        # period.
+        # ----------------------------------------------------
+
+        if (
+            start_time is not None
+            and entry_time < start_time
+        ):
+
+            i += 1
+
+            continue
+
+
+        if (
+            end_time is not None
+            and entry_time >= end_time
+        ):
+
+            i += 1
+
+            continue
+
+
         result = simulate_trade(
             df,
             i,
             signal,
         )
+
+
+        # ----------------------------------------------------
+        # Do not allow a trade to continue beyond the
+        # validation period.
+        #
+        # If the exit occurs after end_time, discard the
+        # trade from the validation statistics because its
+        # complete outcome isn't known inside the period.
+        # ----------------------------------------------------
+
+        if (
+            end_time is not None
+            and result["close_time"] >= end_time
+        ):
+
+            break
 
 
         trade = {
@@ -921,7 +974,7 @@ def run_backtest(
             **result,
 
             "entry_time":
-                df.iloc[i]["open_time"],
+                entry_time,
         }
 
 
@@ -962,9 +1015,9 @@ def max_consecutive_losses(
     current = 0
 
 
-    for r in trades["r"]:
+    for value in trades["r"]:
 
-        if float(r) < 0:
+        if float(value) < 0:
 
             current += 1
 
@@ -989,6 +1042,11 @@ def max_drawdown(
     trades,
 ):
 
+    if trades.empty:
+
+        return 0.0
+
+
     equity = (
         trades["r"]
         .astype(float)
@@ -1010,6 +1068,281 @@ def max_drawdown(
 
     return float(
         drawdown.min()
+    )
+
+
+# ============================================================
+# PERFORMANCE METRICS
+# ============================================================
+
+def calculate_metrics(
+    trades,
+):
+
+    if trades.empty:
+
+        return {
+
+            "trades": 0,
+
+            "total_r": 0.0,
+
+            "avg_r": 0.0,
+
+            "profit_factor": 0.0,
+
+            "win_rate": 0.0,
+
+            "max_dd": 0.0,
+
+            "max_losses": 0,
+
+            "tp2": 0,
+
+            "sl": 0,
+
+            "tp1_be": 0,
+
+            "time": 0,
+        }
+
+
+    r = trades["r"].astype(
+        float
+    )
+
+
+    positive = r[r > 0]
+
+    negative = r[r < 0]
+
+
+    gross_profit = float(
+        positive.sum()
+    )
+
+
+    gross_loss = abs(
+        float(
+            negative.sum()
+        )
+    )
+
+
+    if gross_loss > 0:
+
+        profit_factor = (
+            gross_profit
+            / gross_loss
+        )
+
+    else:
+
+        profit_factor = float(
+            "inf"
+        )
+
+
+    return {
+
+        "trades":
+            len(trades),
+
+        "total_r":
+            float(r.sum()),
+
+        "avg_r":
+            float(r.mean()),
+
+        "profit_factor":
+            profit_factor,
+
+        "win_rate":
+            float(
+                (
+                    r > 0
+                ).mean()
+                * 100
+            ),
+
+        "max_dd":
+            max_drawdown(
+                trades
+            ),
+
+        "max_losses":
+            max_consecutive_losses(
+                trades
+            ),
+
+        "tp2":
+            int(
+                (
+                    trades["outcome"]
+                    == "TP2"
+                ).sum()
+            ),
+
+        "sl":
+            int(
+                (
+                    trades["outcome"]
+                    == "SL"
+                ).sum()
+            ),
+
+        "tp1_be":
+            int(
+                (
+                    trades["outcome"]
+                    == "TP1_BE"
+                ).sum()
+            ),
+
+        "time":
+            int(
+                (
+                    trades["outcome"]
+                    == "TIME"
+                ).sum()
+            ),
+    }
+
+
+# ============================================================
+# PRINT PERFORMANCE
+# ============================================================
+
+def print_performance(
+    trades,
+    title,
+):
+
+    print(
+        "\n"
+        + "=" * 72
+    )
+
+    print(title)
+
+    print(
+        "=" * 72
+    )
+
+
+    if trades.empty:
+
+        print(
+            "NO COMPLETED TRADES."
+        )
+
+        return
+
+
+    metrics = calculate_metrics(
+        trades
+    )
+
+
+    print(
+        f"Trades:             "
+        f"{metrics['trades']}"
+    )
+
+
+    print(
+        "\nOUTCOMES"
+    )
+
+    print(
+        "-" * 72
+    )
+
+
+    print(
+        f"TP2:                "
+        f"{metrics['tp2']}"
+    )
+
+
+    print(
+        f"Full SL:            "
+        f"{metrics['sl']}"
+    )
+
+
+    print(
+        f"TP1 -> BE:          "
+        f"{metrics['tp1_be']}"
+    )
+
+
+    print(
+        f"Time exits:         "
+        f"{metrics['time']}"
+    )
+
+
+    print(
+        "\nPERFORMANCE"
+    )
+
+    print(
+        "-" * 72
+    )
+
+
+    print(
+        f"Profitable trades:  "
+        f"{int((trades['r'] > 0).sum())}"
+    )
+
+
+    print(
+        f"Losing trades:      "
+        f"{int((trades['r'] < 0).sum())}"
+    )
+
+
+    print(
+        f"Win rate:           "
+        f"{metrics['win_rate']:.1f}%"
+    )
+
+
+    print(
+        f"Total R:            "
+        f"{metrics['total_r']:+.2f}R"
+    )
+
+
+    print(
+        f"Average R/trade:    "
+        f"{metrics['avg_r']:+.3f}R"
+    )
+
+
+    print(
+        f"Expectancy:         "
+        f"{metrics['avg_r']:+.3f}R"
+    )
+
+
+    print(
+        f"Profit factor:      "
+        f"{metrics['profit_factor']:.2f}"
+    )
+
+
+    print(
+        f"Max drawdown:       "
+        f"{metrics['max_dd']:.2f}R"
+    )
+
+
+    print(
+        f"Max losing streak:  "
+        f"{metrics['max_losses']}"
     )
 
 
@@ -1039,62 +1372,40 @@ def monthly_report(
     )
 
 
-    grouped = (
-        temp
-        .groupby("month")
-    )
-
-
     print(
         "\nMONTHLY PERFORMANCE"
     )
 
-
     print(
-        "-" * 70
+        "-" * 72
     )
 
 
-    for month, group in grouped:
+    for month, group in (
+        temp.groupby("month")
+    ):
 
-        count = len(group)
-
-        total_r = float(
-            group["r"]
-            .sum()
-        )
-
-
-        wins = int(
-            (
-                group["r"] > 0
-            ).sum()
-        )
-
-
-        losses = int(
-            (
-                group["r"] < 0
-            ).sum()
+        r = group["r"].astype(
+            float
         )
 
 
         print(
             f"{month}  "
-            f"trades={count:3d}  "
-            f"wins={wins:3d}  "
-            f"losses={losses:3d}  "
-            f"R={total_r:+7.2f}"
+            f"trades={len(group):3d}  "
+            f"R={r.sum():+7.2f}  "
+            f"avg={r.mean():+.3f}"
         )
 
 
 # ============================================================
-# SUMMARIZE
+# ROBUSTNESS TEST
+#
+# TRAINING DATA ONLY
 # ============================================================
 
-def summarize(
-    trades,
-    config_name,
+def robustness_test(
+    training_df,
 ):
 
     print(
@@ -1103,464 +1414,7 @@ def summarize(
     )
 
     print(
-        f"BTCUSDT 5m V3 "
-        f"BEARISH RANGE LIQUIDITY BACKTEST"
-    )
-
-    print(
-        "=" * 72
-    )
-
-
-    print(
-        f"Configuration: {config_name}"
-    )
-
-
-    if trades.empty:
-
-        print(
-            "\nNO TRADES FOUND."
-        )
-
-        return
-
-
-    total = len(
-        trades
-    )
-
-
-    tp2 = int(
-        (
-            trades["outcome"]
-            == "TP2"
-        ).sum()
-    )
-
-
-    sl = int(
-        (
-            trades["outcome"]
-            == "SL"
-        ).sum()
-    )
-
-
-    tp1_sl = int(
-        (
-            trades["outcome"]
-            == "TP1_SL"
-        ).sum()
-    )
-
-
-    time_exits = int(
-        (
-            trades["outcome"]
-            == "TIME"
-        ).sum()
-    )
-
-
-    open_end = int(
-        (
-            trades["outcome"]
-            == "OPEN_AT_END"
-        ).sum()
-    )
-
-
-    tp1_hits = int(
-        trades["tp1_hit"]
-        .sum()
-    )
-
-
-    r_values = (
-        trades["r"]
-        .astype(float)
-    )
-
-
-    total_r = float(
-        r_values.sum()
-    )
-
-
-    average_r = float(
-        r_values.mean()
-    )
-
-
-    positive = (
-        r_values[
-            r_values > 0
-        ]
-    )
-
-
-    negative = (
-        r_values[
-            r_values < 0
-        ]
-    )
-
-
-    gross_profit = float(
-        positive.sum()
-    )
-
-
-    gross_loss = abs(
-        float(
-            negative.sum()
-        )
-    )
-
-
-    if gross_loss > 0:
-
-        profit_factor = (
-            gross_profit
-            / gross_loss
-        )
-
-    else:
-
-        profit_factor = float(
-            "inf"
-        )
-
-
-    winning_trades = int(
-        (
-            r_values > 0
-        ).sum()
-    )
-
-
-    losing_trades = int(
-        (
-            r_values < 0
-        ).sum()
-    )
-
-
-    win_rate = (
-        winning_trades
-        / total
-        * 100
-    )
-
-
-    expectancy = (
-        average_r
-    )
-
-
-    dd = max_drawdown(
-        trades
-    )
-
-
-    consecutive_losses = (
-        max_consecutive_losses(
-            trades
-        )
-    )
-
-
-    average_volume = float(
-        trades[
-            "volume_ratio"
-        ].mean()
-    )
-
-
-    minimum_volume = float(
-        trades[
-            "volume_ratio"
-        ].min()
-    )
-
-
-    maximum_volume = float(
-        trades[
-            "volume_ratio"
-        ].max()
-    )
-
-
-    average_range = float(
-        trades[
-            "range_width_pct"
-        ].mean()
-        * 100
-    )
-
-
-    average_planned_reward = float(
-        trades[
-            "planned_reward_r"
-        ].mean()
-    )
-
-
-    print(
-        f"\nTrades:             {total}"
-    )
-
-
-    print(
-        "\nOUTCOMES"
-    )
-
-    print(
-        "-" * 72
-    )
-
-
-    print(
-        f"TP2 wins:           {tp2}"
-    )
-
-    print(
-        f"Full SL:            {sl}"
-    )
-
-    print(
-        f"TP1 -> BE:          {tp1_sl}"
-    )
-
-    print(
-        f"Time exits:         {time_exits}"
-    )
-
-    print(
-        f"Open at end:        {open_end}"
-    )
-
-    print(
-        f"TP1 hits:           {tp1_hits}"
-    )
-
-
-    print(
-        "\nPERFORMANCE"
-    )
-
-    print(
-        "-" * 72
-    )
-
-
-    print(
-        f"Profitable trades:  {winning_trades}"
-    )
-
-    print(
-        f"Losing trades:      {losing_trades}"
-    )
-
-    print(
-        f"Win rate:           {win_rate:.1f}%"
-    )
-
-    print(
-        f"Total R:            {total_r:+.2f}R"
-    )
-
-    print(
-        f"Average R/trade:    {average_r:+.3f}R"
-    )
-
-    print(
-        f"Expectancy:         {expectancy:+.3f}R"
-    )
-
-    print(
-        f"Profit factor:      {profit_factor:.2f}"
-    )
-
-    print(
-        f"Max drawdown:       {dd:.2f}R"
-    )
-
-    print(
-        f"Max losing streak:  {consecutive_losses}"
-    )
-
-
-    print(
-        "\nSIGNAL QUALITY"
-    )
-
-    print(
-        "-" * 72
-    )
-
-
-    print(
-        f"Avg sweep volume:   {average_volume:.2f}x"
-    )
-
-    print(
-        f"Min sweep volume:   {minimum_volume:.2f}x"
-    )
-
-    print(
-        f"Max sweep volume:   {maximum_volume:.2f}x"
-    )
-
-    print(
-        f"Avg range width:    {average_range:.3f}%"
-    )
-
-    print(
-        f"Avg planned reward: {average_planned_reward:.2f}R"
-    )
-
-
-    print(
-        "\nR CONTRIBUTION"
-    )
-
-    print(
-        "-" * 72
-    )
-
-
-    tp2_r = float(
-        trades.loc[
-            trades["outcome"] == "TP2",
-            "r"
-        ].sum()
-    )
-
-
-    sl_r = float(
-        trades.loc[
-            trades["outcome"].isin(
-                ["SL"]
-            ),
-            "r"
-        ].sum()
-    )
-
-
-    tp1_sl_r = float(
-        trades.loc[
-            trades["outcome"] == "TP1_SL",
-            "r"
-        ].sum()
-    )
-
-
-    time_r = float(
-        trades.loc[
-            trades["outcome"] == "TIME",
-            "r"
-        ].sum()
-    )
-
-
-    print(
-        f"TP2 R:              {tp2_r:+.2f}R"
-    )
-
-
-    print(
-        f"Full SL R:          {sl_r:+.2f}R"
-    )
-
-
-    print(
-        f"TP1 -> BE R:        {tp1_sl_r:+.2f}R"
-    )
-
-
-    print(
-        f"TIME R:             {time_r:+.2f}R"
-    )
-
-
-    print(
-        f"TOTAL R:            {total_r:+.2f}R"
-    )
-
-
-    # --------------------------------------------------------
-    # ACCOUNTING CHECK
-    # --------------------------------------------------------
-
-    calculated_r = (
-        tp2_r
-        + sl_r
-        + tp1_sl_r
-        + time_r
-    )
-
-
-    print(
-        "\nACCOUNTING CHECK"
-    )
-
-    print(
-        "-" * 72
-    )
-
-
-    print(
-        f"Components:         {calculated_r:+.2f}R"
-    )
-
-
-    print(
-        f"Reported total:     {total_r:+.2f}R"
-    )
-
-
-    difference = (
-        calculated_r
-        - total_r
-    )
-
-
-    if abs(difference) < 0.0001:
-
-        print(
-            "✓ R accounting is consistent."
-        )
-
-    else:
-
-        print(
-            f"⚠ R accounting difference: "
-            f"{difference:+.5f}"
-        )
-
-
-    monthly_report(
-        trades
-    )
-
-
-# ============================================================
-# ROBUSTNESS TABLE
-# ============================================================
-
-def robustness_summary(
-    df,
-):
-
-    print(
-        "\n"
-        + "=" * 72
-    )
-
-    print(
-        "PARAMETER ROBUSTNESS TEST"
+        "TRAINING-PERIOD ROBUSTNESS TEST"
     )
 
     print(
@@ -1571,71 +1425,16 @@ def robustness_summary(
     results = []
 
 
-    for config in TEST_CONFIGS:
-
-        print(
-            f"\nTesting {config['name']}..."
-        )
-
+    for config in TRAINING_TESTS:
 
         trades = run_backtest(
-            df,
+            training_df,
             config,
         )
 
 
-        if trades.empty:
-
-            results.append({
-
-                "config":
-                    config["name"],
-
-                "trades":
-                    0,
-
-                "total_r":
-                    0,
-
-                "avg_r":
-                    0,
-
-                "profit_factor":
-                    0,
-
-                "max_dd":
-                    0,
-
-                "win_rate":
-                    0,
-            })
-
-
-            continue
-
-
-        r = trades["r"].astype(
-            float
-        )
-
-
-        gross_profit = float(
-            r[r > 0].sum()
-        )
-
-
-        gross_loss = abs(
-            float(
-                r[r < 0].sum()
-            )
-        )
-
-
-        pf = (
-            gross_profit
-            / gross_loss
-            if gross_loss > 0
-            else float("inf")
+        metrics = calculate_metrics(
+            trades
         )
 
 
@@ -1645,29 +1444,23 @@ def robustness_summary(
                 config["name"],
 
             "trades":
-                len(trades),
+                metrics["trades"],
 
             "total_r":
-                float(r.sum()),
+                metrics["total_r"],
 
             "avg_r":
-                float(r.mean()),
+                metrics["avg_r"],
 
             "profit_factor":
-                pf,
+                metrics["profit_factor"],
 
             "max_dd":
-                max_drawdown(
-                    trades
-                ),
+                metrics["max_dd"],
 
             "win_rate":
-                float(
-                    (
-                        r > 0
-                    ).mean()
-                    * 100
-                ),
+                metrics["win_rate"],
+
         })
 
 
@@ -1677,8 +1470,7 @@ def robustness_summary(
 
 
     print(
-        "\n"
-        + result_df.to_string(
+        result_df.to_string(
             index=False,
             float_format=lambda x:
                 f"{x:.3f}"
@@ -1706,13 +1498,24 @@ def main():
 
 
     parser.add_argument(
+        "--train-days",
+        type=int,
+        default=120,
+    )
+
+
+    parser.add_argument(
         "--output",
-        default="backtest_v3_trades.csv",
+        default="backtest_v4_validation_trades.csv",
     )
 
 
     args = parser.parse_args()
 
+
+    # ========================================================
+    # DATE RANGE
+    # ========================================================
 
     end = datetime.now(
         timezone.utc
@@ -1727,10 +1530,49 @@ def main():
     )
 
 
+    split_time = (
+        end
+        - timedelta(
+            days=args.days
+            - args.train_days
+        )
+    )
+
+
     print(
-        f"Downloading "
-        f"BTCUSDT 5m data "
-        f"for {args.days} days..."
+        "\n"
+        + "=" * 72
+    )
+
+    print(
+        "BTCUSDT V4 OUT-OF-SAMPLE BACKTEST"
+    )
+
+    print(
+        "=" * 72
+    )
+
+
+    print(
+        f"Total period:      "
+        f"{start.date()} → {end.date()}"
+    )
+
+
+    print(
+        f"Training period:   "
+        f"{start.date()} → {split_time.date()}"
+    )
+
+
+    print(
+        f"Validation period: "
+        f"{split_time.date()} → {end.date()}"
+    )
+
+
+    print(
+        "\nDownloading BTCUSDT 5m data..."
     )
 
 
@@ -1753,57 +1595,271 @@ def main():
 
 
     # ========================================================
-    # BASE TEST
+    # TRAINING DATA
     # ========================================================
 
-    base_config = TEST_CONFIGS[0]
+    training_df = df[
+        df["open_time"] < split_time
+    ].copy()
 
 
-    trades = run_backtest(
-        df,
-        base_config,
+    # ========================================================
+    # VALIDATION DATA
+    #
+    # We intentionally use the COMPLETE df here so the
+    # first validation signals have enough historical candles.
+    #
+    # Trades themselves are restricted to validation dates.
+    # ========================================================
+
+    print(
+        "\nRunning BASE strategy on training data..."
     )
 
 
-    if not trades.empty:
+    training_trades = run_backtest(
+        df,
+        BASE_CONFIG,
+        start_time=start,
+        end_time=split_time,
+    )
 
-        trades.to_csv(
+
+    print_performance(
+        training_trades,
+        "TRAINING RESULTS — FIRST 120 DAYS",
+    )
+
+
+    monthly_report(
+        training_trades
+    )
+
+
+    # ========================================================
+    # VALIDATION
+    # ========================================================
+
+    print(
+        "\nRunning untouched BASE strategy on validation data..."
+    )
+
+
+    validation_trades = run_backtest(
+        df,
+        BASE_CONFIG,
+        start_time=split_time,
+        end_time=end,
+    )
+
+
+    print_performance(
+        validation_trades,
+        "VALIDATION RESULTS — FINAL 60 DAYS",
+    )
+
+
+    monthly_report(
+        validation_trades
+    )
+
+
+    # ========================================================
+    # SAVE VALIDATION TRADES
+    # ========================================================
+
+    if not validation_trades.empty:
+
+        validation_trades.to_csv(
             args.output,
             index=False,
         )
 
 
         print(
-            f"\nSaved trade list to "
+            f"\nSaved validation trades to "
             f"{args.output}"
         )
 
 
-    summarize(
-        trades,
-        base_config["name"],
-    )
+    # ========================================================
+    # SAVE TRAINING TRADES
+    # ========================================================
+
+    if not training_trades.empty:
+
+        training_trades.to_csv(
+            "backtest_v4_training_trades.csv",
+            index=False,
+        )
+
+
+        print(
+            "Saved training trades to "
+            "backtest_v4_training_trades.csv"
+        )
 
 
     # ========================================================
-    # ROBUSTNESS
+    # TRAINING ROBUSTNESS
     # ========================================================
 
-    robustness = robustness_summary(
-        df
+    robustness = robustness_test(
+        training_df
     )
 
 
     robustness.to_csv(
-        "backtest_v3_robustness.csv",
+        "backtest_v4_training_robustness.csv",
         index=False,
     )
 
 
     print(
         "\nSaved robustness results to "
-        "backtest_v3_robustness.csv"
+        "backtest_v4_training_robustness.csv"
     )
+
+
+    # ========================================================
+    # FINAL COMPARISON
+    # ========================================================
+
+    train_metrics = calculate_metrics(
+        training_trades
+    )
+
+
+    validation_metrics = calculate_metrics(
+        validation_trades
+    )
+
+
+    print(
+        "\n"
+        + "=" * 72
+    )
+
+    print(
+        "TRAINING vs VALIDATION"
+    )
+
+    print(
+        "=" * 72
+    )
+
+
+    print(
+        f"{'Metric':<24}"
+        f"{'Training':>16}"
+        f"{'Validation':>16}"
+    )
+
+
+    print(
+        "-" * 56
+    )
+
+
+    print(
+        f"{'Trades':<24}"
+        f"{train_metrics['trades']:>16}"
+        f"{validation_metrics['trades']:>16}"
+    )
+
+
+    print(
+        f"{'Total R':<24}"
+        f"{train_metrics['total_r']:>15.2f}R"
+        f"{validation_metrics['total_r']:>15.2f}R"
+    )
+
+
+    print(
+        f"{'Avg R/trade':<24}"
+        f"{train_metrics['avg_r']:>15.3f}"
+        f"{validation_metrics['avg_r']:>15.3f}"
+    )
+
+
+    print(
+        f"{'Profit factor':<24}"
+        f"{train_metrics['profit_factor']:>16.2f}"
+        f"{validation_metrics['profit_factor']:>16.2f}"
+    )
+
+
+    print(
+        f"{'Win rate':<24}"
+        f"{train_metrics['win_rate']:>15.1f}%"
+        f"{validation_metrics['win_rate']:>15.1f}%"
+    )
+
+
+    print(
+        f"{'Max drawdown':<24}"
+        f"{train_metrics['max_dd']:>15.2f}R"
+        f"{validation_metrics['max_dd']:>15.2f}R"
+    )
+
+
+    print(
+        f"{'Max losing streak':<24}"
+        f"{train_metrics['max_losses']:>16}"
+        f"{validation_metrics['max_losses']:>16}"
+    )
+
+
+    print(
+        "=" * 72
+    )
+
+
+    # ========================================================
+    # INTERPRETATION
+    # ========================================================
+
+    print(
+        "\nVALIDATION VERDICT"
+    )
+
+    print(
+        "-" * 72
+    )
+
+
+    if validation_trades.empty:
+
+        print(
+            "⚠ No validation trades."
+        )
+
+
+    elif (
+        validation_metrics["total_r"] > 0
+        and validation_metrics["profit_factor"] > 1
+        and validation_metrics["avg_r"] > 0
+    ):
+
+        print(
+            "🟢 POSITIVE OUT-OF-SAMPLE RESULT"
+        )
+
+        print(
+            "The BASE strategy remained profitable "
+            "on unseen data."
+        )
+
+
+    else:
+
+        print(
+            "🔴 NEGATIVE OUT-OF-SAMPLE RESULT"
+        )
+
+        print(
+            "Do NOT move the strategy to the live bot yet."
+        )
 
 
 # ============================================================
