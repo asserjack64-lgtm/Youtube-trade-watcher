@@ -7,31 +7,67 @@ import matplotlib.pyplot as plt
 
 
 # ============================================================
-# SETTINGS
+# V4 BTC RANGE LIQUIDITY STRATEGY
 # ============================================================
 
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
-CANDLES = 200
-
-SWING_LOOKBACK = 3
-ZONE_TOLERANCE = 0.001
-
-SWEEP_PCT = 0.0005
-VOLUME_MULTIPLIER = 1.5
-
-CONFIRM_CANDLES = 2
-COOLDOWN_MINUTES = 30
-
-HEARTBEAT_MINUTES = 60
-
-STATE_FILE = "trade_state.json"
-HISTORY_FILE = "trade_history.json"
-CHART_FILE = "btc_liquidity_setup.png"
+CANDLES = 300
 
 
 # ============================================================
-# TELEGRAM SETTINGS
+# V4 STRATEGY PARAMETERS
+# ============================================================
+
+RANGE_CANDLES = 24
+
+MAX_RANGE_WIDTH_PCT = 0.015
+
+SWEEP_PCT = 0.0003
+
+SL_BUFFER_PCT = 0.0005
+
+VOLUME_LOOKBACK = 20
+
+MIN_VOLUME_RATIO = 1.50
+
+CONFIRM_BODY_MIN_PCT = 0.0008
+
+
+# ============================================================
+# TRADE MANAGEMENT
+# ============================================================
+
+TP1_R = 1.0
+TP2_R = 2.0
+
+TP1_PARTIAL = 0.50
+
+MOVE_SL_TO_BREAKEVEN = True
+
+MAX_BARS_IN_TRADE = 72
+
+
+# ============================================================
+# HEARTBEAT
+# ============================================================
+
+HEARTBEAT_MINUTES = 60
+
+
+# ============================================================
+# FILES
+# ============================================================
+
+STATE_FILE = "trade_state.json"
+
+HISTORY_FILE = "trade_history.json"
+
+CHART_FILE = "btc_v4_setup.png"
+
+
+# ============================================================
+# TELEGRAM
 # ============================================================
 
 BOT_TOKEN = os.environ.get(
@@ -44,17 +80,19 @@ CHAT_ID = os.environ.get(
 
 
 # ============================================================
-# TELEGRAM TEXT
+# TELEGRAM MESSAGE
 # ============================================================
 
 def telegram(message):
 
     if not BOT_TOKEN:
+
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN is missing"
         )
 
     if not CHAT_ID:
+
         raise RuntimeError(
             "TELEGRAM_CHAT_ID is missing"
         )
@@ -88,11 +126,13 @@ def send_chart(
 ):
 
     if not BOT_TOKEN:
+
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN is missing"
         )
 
     if not CHAT_ID:
+
         raise RuntimeError(
             "TELEGRAM_CHAT_ID is missing"
         )
@@ -134,23 +174,24 @@ def send_heartbeat(state):
         tz="UTC"
     )
 
-    last_heartbeat = state.get(
+    last = state.get(
         "last_heartbeat",
         ""
     )
 
-    if last_heartbeat:
+    if last:
 
         try:
 
             previous = pd.to_datetime(
-                last_heartbeat,
+                last,
                 utc=True
             )
 
             minutes = (
                 now - previous
-            ).total_seconds() / 60
+            ).total_seconds()
+            / 60
 
             if minutes < HEARTBEAT_MINUTES:
 
@@ -162,34 +203,38 @@ def send_heartbeat(state):
 
 
     message = f"""
-🟢 BTC LIQUIDITY MONITOR
+🟢 BTC V4 MONITOR
 
 Bot status: ACTIVE
 
-Market: BTCUSDT
-Timeframe: 5m
+Market:
+BTCUSDT
 
-Last market check:
+Timeframe:
+5m
+
+Strategy:
+V4 Range Liquidity Sweep
+
+Current check:
 {now.strftime("%Y-%m-%d %H:%M UTC")}
-
-Status:
-Market analysis running normally.
 
 Monitoring:
 
-💧 Liquidity sweeps
+📦 2-hour range
+💧 Liquidity sweep
 📊 Volume confirmation
-📈 Price confirmation
-🎯 Paper-trade setups
+📈 Displacement confirmation
+🎯 Paper trade setups
 
-⚠️ No action required.
+⚠️ No real trades are being placed.
 """
 
     telegram(message)
 
-    state["last_heartbeat"] = (
-        now.isoformat()
-    )
+    state[
+        "last_heartbeat"
+    ] = now.isoformat()
 
     return True
 
@@ -206,10 +251,17 @@ def get_data():
     )
 
     params = {
-        "symbol": SYMBOL,
-        "interval": INTERVAL,
-        "limit": CANDLES
+
+        "symbol":
+            SYMBOL,
+
+        "interval":
+            INTERVAL,
+
+        "limit":
+            CANDLES
     }
+
 
     response = requests.get(
         url,
@@ -221,40 +273,62 @@ def get_data():
 
     data = response.json()
 
+
     columns = [
+
         "time",
+
         "open",
+
         "high",
+
         "low",
+
         "close",
+
         "volume",
+
         "close_time",
+
         "quote_volume",
+
         "trades",
+
         "taker_buy_volume",
+
         "taker_buy_quote_volume",
+
         "unused"
     ]
+
 
     df = pd.DataFrame(
         data,
         columns=columns
     )
 
-    numeric_columns = [
+
+    numeric = [
+
         "open",
+
         "high",
+
         "low",
+
         "close",
+
         "volume"
     ]
 
-    for column in numeric_columns:
+
+    for column in numeric:
 
         df[column] = pd.to_numeric(
             df[column],
             errors="coerce"
         )
+
 
     df["time"] = pd.to_datetime(
         df["time"],
@@ -262,303 +336,40 @@ def get_data():
         utc=True
     )
 
+
+    df["close_time"] = pd.to_datetime(
+        df["close_time"],
+        unit="ms",
+        utc=True
+    )
+
+
+    # Remove forming candle.
+
+    now = pd.Timestamp.now(
+        tz="UTC"
+    )
+
+    df = df[
+        df["close_time"] <= now
+    ]
+
+
+    df = (
+        df
+        .drop_duplicates(
+            "time"
+        )
+        .sort_values(
+            "time"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
     return df
-
-
-# ============================================================
-# FIND SWINGS
-# ============================================================
-
-def find_swings(df):
-
-    highs = []
-    lows = []
-
-    n = SWING_LOOKBACK
-
-    if len(df) < (
-        n * 2 + 1
-    ):
-
-        return highs, lows
-
-    for i in range(
-        n,
-        len(df) - n
-    ):
-
-        high = float(
-            df.iloc[i]["high"]
-        )
-
-        low = float(
-            df.iloc[i]["low"]
-        )
-
-        left_high = float(
-            df.iloc[
-                i - n:i
-            ]["high"].max()
-        )
-
-        right_high = float(
-            df.iloc[
-                i + 1:i + n + 1
-            ]["high"].max()
-        )
-
-        left_low = float(
-            df.iloc[
-                i - n:i
-            ]["low"].min()
-        )
-
-        right_low = float(
-            df.iloc[
-                i + 1:i + n + 1
-            ]["low"].min()
-        )
-
-        if (
-            high > left_high
-            and high >= right_high
-        ):
-
-            highs.append({
-                "index": i,
-                "price": high
-            })
-
-        if (
-            low < left_low
-            and low <= right_low
-        ):
-
-            lows.append({
-                "index": i,
-                "price": low
-            })
-
-    return highs, lows
-
-
-# ============================================================
-# CLUSTER LIQUIDITY LEVELS
-# ============================================================
-
-def cluster(levels):
-
-    zones = []
-
-    for item in levels:
-
-        if isinstance(
-            item,
-            dict
-        ):
-
-            price = float(
-                item["price"]
-            )
-
-        else:
-
-            price = float(item)
-
-        found = False
-
-        for i, zone in enumerate(
-            zones
-        ):
-
-            if (
-                abs(
-                    price - zone
-                )
-                / zone
-                <= ZONE_TOLERANCE
-            ):
-
-                zones[i] = (
-                    zone + price
-                ) / 2
-
-                found = True
-
-                break
-
-        if not found:
-
-            zones.append(
-                price
-            )
-
-    return zones
-
-
-# ============================================================
-# FIND LIQUIDITY SWEEP
-# ============================================================
-
-def find_sweep(
-    df,
-    index,
-    direction
-):
-
-    if index < 30:
-        return None
-
-    history = df.iloc[
-        :index
-    ].copy()
-
-    highs, lows = find_swings(
-        history
-    )
-
-    high_zones = cluster(
-        highs
-    )
-
-    low_zones = cluster(
-        lows
-    )
-
-    candle = df.iloc[
-        index
-    ]
-
-    price = float(
-        candle["close"]
-    )
-
-
-    # ========================================================
-    # BEARISH
-    # ========================================================
-
-    if direction == "BEARISH":
-
-        for level in high_zones:
-
-            distance = (
-                float(level) - price
-            ) / price
-
-            if distance < 0:
-                continue
-
-            if distance > 0.003:
-                continue
-
-            swept = (
-                float(candle["high"])
-                >
-                level * (
-                    1 + SWEEP_PCT
-                )
-            )
-
-            reclaimed = (
-                float(candle["close"])
-                < level
-            )
-
-            if swept and reclaimed:
-
-                return float(level)
-
-
-    # ========================================================
-    # BULLISH
-    # ========================================================
-
-    if direction == "BULLISH":
-
-        for level in low_zones:
-
-            distance = (
-                price - float(level)
-            ) / price
-
-            if distance < 0:
-                continue
-
-            if distance > 0.003:
-                continue
-
-            swept = (
-                float(candle["low"])
-                <
-                level * (
-                    1 - SWEEP_PCT
-                )
-            )
-
-            reclaimed = (
-                float(candle["close"])
-                > level
-            )
-
-            if swept and reclaimed:
-
-                return float(level)
-
-    return None
-
-
-# ============================================================
-# CONFIRMATION
-# ============================================================
-
-def check_confirmation(
-    df,
-    sweep_index,
-    level,
-    direction
-):
-
-    end = (
-        sweep_index
-        + CONFIRM_CANDLES
-    )
-
-    if end >= len(df):
-
-        return False
-
-    confirmation = df.iloc[
-        sweep_index + 1:end + 1
-    ]
-
-    if direction == "BEARISH":
-
-        for _, candle in (
-            confirmation.iterrows()
-        ):
-
-            if (
-                float(candle["close"])
-                >= level
-            ):
-
-                return False
-
-    else:
-
-        for _, candle in (
-            confirmation.iterrows()
-        ):
-
-            if (
-                float(candle["close"])
-                <= level
-            ):
-
-                return False
-
-    return True
 
 
 # ============================================================
@@ -572,188 +383,529 @@ def volume_ratio(
 
     start = max(
         0,
-        index - 20
+        index - VOLUME_LOOKBACK
     )
 
     previous = df.iloc[
         start:index
     ]["volume"]
 
-    if len(previous) == 0:
 
-        return 0
+    if len(previous) < 5:
+
+        return 0.0
+
 
     average = previous.mean()
 
+
     if average <= 0:
 
-        return 0
+        return 0.0
 
-    return (
-        float(
-            df.iloc[index]["volume"]
-        )
-        /
-        float(average)
+
+    return float(
+        df.iloc[index]["volume"]
+        / average
     )
 
 
 # ============================================================
-# ANALYZE MARKET
+# V4 RANGE SIGNAL
+# ============================================================
+
+def find_signal(
+    df,
+    confirmation_index
+):
+
+    # confirmation_index is the candle
+    # immediately after the sweep.
+
+    sweep_index = (
+        confirmation_index - 1
+    )
+
+
+    minimum = (
+        RANGE_CANDLES
+        + VOLUME_LOOKBACK
+        + 2
+    )
+
+
+    if sweep_index < minimum:
+
+        return None
+
+
+    # ========================================================
+    # RANGE
+    # ========================================================
+
+    range_df = df.iloc[
+        sweep_index - RANGE_CANDLES:
+        sweep_index
+    ]
+
+
+    range_high = float(
+        range_df["high"].max()
+    )
+
+
+    range_low = float(
+        range_df["low"].min()
+    )
+
+
+    midpoint = (
+        range_high
+        + range_low
+    ) / 2
+
+
+    if midpoint <= 0:
+
+        return None
+
+
+    range_width_pct = (
+        range_high
+        - range_low
+    ) / midpoint
+
+
+    if (
+        range_width_pct
+        > MAX_RANGE_WIDTH_PCT
+    ):
+
+        return None
+
+
+    sweep = df.iloc[
+        sweep_index
+    ]
+
+
+    confirm = df.iloc[
+        confirmation_index
+    ]
+
+
+    sweep_high = float(
+        sweep["high"]
+    )
+
+
+    sweep_low = float(
+        sweep["low"]
+    )
+
+
+    sweep_close = float(
+        sweep["close"]
+    )
+
+
+    confirm_open = float(
+        confirm["open"]
+    )
+
+
+    confirm_high = float(
+        confirm["high"]
+    )
+
+
+    confirm_low = float(
+        confirm["low"]
+    )
+
+
+    confirm_close = float(
+        confirm["close"]
+    )
+
+
+    # ========================================================
+    # VOLUME
+    # ========================================================
+
+    vr = volume_ratio(
+        df,
+        sweep_index
+    )
+
+
+    if vr < MIN_VOLUME_RATIO:
+
+        return None
+
+
+    # ========================================================
+    # BEARISH SWEEP
+    # ========================================================
+
+    bearish_sweep = (
+
+        sweep_high
+        >
+        range_high
+        * (
+            1 + SWEEP_PCT
+        )
+
+        and
+
+        sweep_close
+        <
+        range_high
+    )
+
+
+    bearish_body_pct = (
+
+        confirm_open
+        - confirm_close
+    ) / confirm_open
+
+
+    bearish_confirmation = (
+
+        confirm_close
+        <
+        range_high
+
+        and
+
+        confirm_close
+        <
+        confirm_open
+
+        and
+
+        bearish_body_pct
+        >= CONFIRM_BODY_MIN_PCT
+
+        and
+
+        confirm_close
+        <
+        (
+            sweep_high
+            + sweep_close
+        ) / 2
+    )
+
+
+    if (
+        bearish_sweep
+        and
+        bearish_confirmation
+    ):
+
+        entry = confirm_close
+
+
+        # Stop beyond actual sweep extreme.
+
+        stop = (
+            sweep_high
+            * (
+                1 + SL_BUFFER_PCT
+            )
+        )
+
+
+        risk = (
+            stop
+            - entry
+        )
+
+
+        if risk <= 0:
+
+            return None
+
+
+        tp1 = (
+            entry
+            - risk * TP1_R
+        )
+
+
+        theoretical_tp2 = (
+            entry
+            - risk * TP2_R
+        )
+
+
+        # Opposite side of range.
+
+        opposite_range = (
+            range_low
+        )
+
+
+        # We cannot demand more than the
+        # available range.
+
+        tp2 = max(
+            theoretical_tp2,
+            opposite_range
+        )
+
+
+        reward_r = (
+            entry
+            - tp2
+        ) / risk
+
+
+        # Require at least 1.5R.
+
+        if reward_r < 1.5:
+
+            return None
+
+
+        return {
+
+            "direction":
+                "BEARISH",
+
+            "signal_time":
+                confirm["time"],
+
+            "sweep_time":
+                sweep["time"],
+
+            "range_high":
+                range_high,
+
+            "range_low":
+                range_low,
+
+            "entry":
+                entry,
+
+            "stop":
+                stop,
+
+            "tp1":
+                tp1,
+
+            "tp2":
+                tp2,
+
+            "volume_ratio":
+                vr,
+
+            "range_width_pct":
+                range_width_pct,
+
+            "reward_r":
+                reward_r
+        }
+
+
+    # ========================================================
+    # BULLISH SWEEP
+    # ========================================================
+
+    bullish_sweep = (
+
+        sweep_low
+        <
+        range_low
+        * (
+            1 - SWEEP_PCT
+        )
+
+        and
+
+        sweep_close
+        >
+        range_low
+    )
+
+
+    bullish_body_pct = (
+
+        confirm_close
+        - confirm_open
+    ) / confirm_open
+
+
+    bullish_confirmation = (
+
+        confirm_close
+        >
+        range_low
+
+        and
+
+        confirm_close
+        >
+        confirm_open
+
+        and
+
+        bullish_body_pct
+        >= CONFIRM_BODY_MIN_PCT
+
+        and
+
+        confirm_close
+        >
+        (
+            sweep_low
+            + sweep_close
+        ) / 2
+    )
+
+
+    if (
+        bullish_sweep
+        and
+        bullish_confirmation
+    ):
+
+        entry = confirm_close
+
+
+        stop = (
+            sweep_low
+            * (
+                1 - SL_BUFFER_PCT
+            )
+        )
+
+
+        risk = (
+            entry
+            - stop
+        )
+
+
+        if risk <= 0:
+
+            return None
+
+
+        tp1 = (
+            entry
+            + risk * TP1_R
+        )
+
+
+        theoretical_tp2 = (
+            entry
+            + risk * TP2_R
+        )
+
+
+        opposite_range = (
+            range_high
+        )
+
+
+        tp2 = min(
+            theoretical_tp2,
+            opposite_range
+        )
+
+
+        reward_r = (
+            tp2
+            - entry
+        ) / risk
+
+
+        if reward_r < 1.5:
+
+            return None
+
+
+        return {
+
+            "direction":
+                "BULLISH",
+
+            "signal_time":
+                confirm["time"],
+
+            "sweep_time":
+                sweep["time"],
+
+            "range_high":
+                range_high,
+
+            "range_low":
+                range_low,
+
+            "entry":
+                entry,
+
+            "stop":
+                stop,
+
+            "tp1":
+                tp1,
+
+            "tp2":
+                tp2,
+
+            "volume_ratio":
+                vr,
+
+            "range_width_pct":
+                range_width_pct,
+
+            "reward_r":
+                reward_r
+        }
+
+
+    return None
+
+
+# ============================================================
+# ANALYZE CURRENT MARKET
 # ============================================================
 
 def analyze(df):
 
-    # Ignore currently forming candle.
+    # --------------------------------------------------------
+    # Latest completed candle
+    # --------------------------------------------------------
 
-    df = df.iloc[
-        :-1
-    ].copy()
-
-    minimum = (
-        30 + CONFIRM_CANDLES
-    )
-
-    if len(df) < minimum:
+    if len(df) < (
+        RANGE_CANDLES
+        + VOLUME_LOOKBACK
+        + 3
+    ):
 
         return None
 
-    confirmation_end = (
+
+    # Last candle is completed because get_data()
+    # removed the currently-forming candle.
+
+    confirmation_index = (
         len(df) - 1
     )
 
-    sweep_index = (
-        confirmation_end
-        - CONFIRM_CANDLES
-    )
 
-    if sweep_index < 30:
-
-        return None
-
-
-    # ========================================================
-    # BEARISH
-    # ========================================================
-
-    bearish_level = find_sweep(
+    signal = find_signal(
         df,
-        sweep_index,
-        "BEARISH"
+        confirmation_index
     )
 
-    if bearish_level is not None:
 
-        ratio = volume_ratio(
-            df,
-            sweep_index
-        )
-
-        if (
-            ratio
-            >= VOLUME_MULTIPLIER
-        ):
-
-            confirmed = (
-                check_confirmation(
-                    df,
-                    sweep_index,
-                    bearish_level,
-                    "BEARISH"
-                )
-            )
-
-            if confirmed:
-
-                return {
-                    "direction": "BEARISH",
-
-                    "level":
-                        bearish_level,
-
-                    "price":
-                        float(
-                            df.iloc[
-                                confirmation_end
-                            ]["close"]
-                        ),
-
-                    "volume_ratio":
-                        ratio,
-
-                    "time":
-                        df.iloc[
-                            sweep_index
-                        ]["time"],
-
-                    "confirmation_time":
-                        df.iloc[
-                            confirmation_end
-                        ]["time"]
-                }
-
-
-    # ========================================================
-    # BULLISH
-    # ========================================================
-
-    bullish_level = find_sweep(
-        df,
-        sweep_index,
-        "BULLISH"
-    )
-
-    if bullish_level is not None:
-
-        ratio = volume_ratio(
-            df,
-            sweep_index
-        )
-
-        if (
-            ratio
-            >= VOLUME_MULTIPLIER
-        ):
-
-            confirmed = (
-                check_confirmation(
-                    df,
-                    sweep_index,
-                    bullish_level,
-                    "BULLISH"
-                )
-            )
-
-            if confirmed:
-
-                return {
-                    "direction": "BULLISH",
-
-                    "level":
-                        bullish_level,
-
-                    "price":
-                        float(
-                            df.iloc[
-                                confirmation_end
-                            ]["close"]
-                        ),
-
-                    "volume_ratio":
-                        ratio,
-
-                    "time":
-                        df.iloc[
-                            sweep_index
-                        ]["time"],
-
-                    "confirmation_time":
-                        df.iloc[
-                            confirmation_end
-                        ]["time"]
-                }
-
-    return None
+    return signal
 
 
 # ============================================================
@@ -764,42 +916,74 @@ def default_state():
 
     return {
 
-        "active": False,
+        "active":
+            False,
 
-        "last_heartbeat": "",
+        "last_heartbeat":
+            "",
 
-        # NEW:
-        # Stores the last setup that was processed.
-        # This prevents the same closed setup from
-        # generating another alert.
+        "last_processed_event_id":
+            "",
 
-        "last_processed_event_id": "",
+        "event_id":
+            "",
 
-        "event_id": "",
+        "direction":
+            "",
 
-        "direction": "",
+        "entry":
+            0,
 
-        "entry": 0,
+        "stop_loss":
+            0,
 
-        "stop_loss": 0,
+        "original_stop_loss":
+            0,
 
-        "tp1": 0,
+        "tp1":
+            0,
 
-        "tp2": 0,
+        "tp2":
+            0,
 
-        "level": 0,
+        "level":
+            0,
 
-        "sweep_time": "",
+        "range_high":
+            0,
 
-        "confirmation_time": "",
+        "range_low":
+            0,
 
-        "volume_ratio": 0,
+        "sweep_time":
+            "",
 
-        "tp1_hit": False,
+        "confirmation_time":
+            "",
 
-        "tp2_hit": False,
+        "volume_ratio":
+            0,
 
-        "sl_hit": False
+        "range_width_pct":
+            0,
+
+        "reward_r":
+            0,
+
+        "tp1_hit":
+            False,
+
+        "tp2_hit":
+            False,
+
+        "sl_hit":
+            False,
+
+        "breakeven":
+            False,
+
+        "bars_in_trade":
+            0
     }
 
 
@@ -818,24 +1002,29 @@ def load_state():
 
             state = json.load(f)
 
-            if not isinstance(
-                state,
-                dict
-            ):
 
-                return default_state()
+        if not isinstance(
+            state,
+            dict
+        ):
 
-            default = default_state()
+            return default_state()
 
-            for key, value in (
-                default.items()
-            ):
 
-                if key not in state:
+        defaults = default_state()
 
-                    state[key] = value
 
-            return state
+        for key, value in (
+            defaults.items()
+        ):
+
+            if key not in state:
+
+                state[key] = value
+
+
+        return state
+
 
     except (
         FileNotFoundError,
@@ -864,7 +1053,7 @@ def save_state(state):
 
 
 # ============================================================
-# LOAD TRADE HISTORY
+# LOAD HISTORY
 # ============================================================
 
 def load_history():
@@ -878,14 +1067,17 @@ def load_history():
 
             history = json.load(f)
 
-            if isinstance(
-                history,
-                list
-            ):
 
-                return history
+        if isinstance(
+            history,
+            list
+        ):
 
-            return []
+            return history
+
+
+        return []
+
 
     except (
         FileNotFoundError,
@@ -896,7 +1088,7 @@ def load_history():
 
 
 # ============================================================
-# SAVE TRADE HISTORY
+# SAVE HISTORY
 # ============================================================
 
 def save_history(history):
@@ -914,17 +1106,13 @@ def save_history(history):
 
 
 # ============================================================
-# CHECK IF EVENT WAS ALREADY PROCESSED
+# DUPLICATE PROTECTION
 # ============================================================
 
 def event_already_processed(
     event_id,
     state
 ):
-
-    # --------------------------------------------------------
-    # CHECK CURRENT STATE
-    # --------------------------------------------------------
 
     if (
         state.get(
@@ -937,10 +1125,6 @@ def event_already_processed(
         return True
 
 
-    # --------------------------------------------------------
-    # CHECK CURRENT / PREVIOUS TRADE
-    # --------------------------------------------------------
-
     if (
         state.get(
             "event_id",
@@ -952,11 +1136,8 @@ def event_already_processed(
         return True
 
 
-    # --------------------------------------------------------
-    # CHECK TRADE HISTORY
-    # --------------------------------------------------------
-
     history = load_history()
+
 
     for trade in history:
 
@@ -980,77 +1161,250 @@ def event_already_processed(
 
 def record_completed_trade(
     state,
-    outcome
+    outcome,
+    exit_price=None
 ):
 
     history = load_history()
 
-    if outcome == "TP2":
 
-        result_r = 2
+    # --------------------------------------------------------
+    # Prevent duplicate history record
+    # --------------------------------------------------------
 
-    elif outcome == "TP1":
+    event_id = state.get(
+        "event_id",
+        ""
+    )
 
-        result_r = 1
+
+    for existing in history:
+
+        if (
+            existing.get(
+                "event_id",
+                ""
+            )
+            == event_id
+        ):
+
+            return
+
+
+    entry = float(
+        state.get(
+            "entry",
+            0
+        )
+    )
+
+
+    stop = float(
+        state.get(
+            "original_stop_loss",
+            state.get(
+                "stop_loss",
+                0
+            )
+        )
+    )
+
+
+    tp1 = float(
+        state.get(
+            "tp1",
+            0
+        )
+    )
+
+
+    tp2 = float(
+        state.get(
+            "tp2",
+            0
+        )
+    )
+
+
+    direction = state.get(
+        "direction",
+        ""
+    )
+
+
+    # --------------------------------------------------------
+    # Calculate realized R
+    # --------------------------------------------------------
+
+    if outcome == "SL":
+
+        result_r = -1.0
+
+
+    elif outcome == "TP1_BE":
+
+        # 50% made +1R.
+        # Remaining 50% exited at breakeven.
+
+        result_r = (
+            TP1_PARTIAL
+            * TP1_R
+        )
+
+
+    elif outcome == "TP2":
+
+        # 50% at TP1 = +0.5R
+        # 50% at TP2 = +1.0R
+        #
+        # Total = +1.5R
+
+        result_r = (
+            TP1_PARTIAL
+            * TP1_R
+            +
+            (
+                1
+                - TP1_PARTIAL
+            )
+            * TP2_R
+        )
+
+
+    elif outcome == "TIME":
+
+        if exit_price is None:
+
+            result_r = 0.0
+
+        else:
+
+            if direction == "BULLISH":
+
+                risk = (
+                    entry
+                    - stop
+                )
+
+                if risk > 0:
+
+                    raw_r = (
+                        exit_price
+                        - entry
+                    ) / risk
+
+                else:
+
+                    raw_r = 0.0
+
+            else:
+
+                risk = (
+                    stop
+                    - entry
+                )
+
+                if risk > 0:
+
+                    raw_r = (
+                        entry
+                        - exit_price
+                    ) / risk
+
+                else:
+
+                    raw_r = 0.0
+
+
+            if state.get(
+                "tp1_hit",
+                False
+            ):
+
+                remaining_fraction = (
+                    1
+                    - TP1_PARTIAL
+                )
+
+
+                if direction == "BULLISH":
+
+                    remaining_r = (
+                        remaining_fraction
+                        * raw_r
+                    )
+
+                else:
+
+                    remaining_r = (
+                        remaining_fraction
+                        * raw_r
+                    )
+
+
+                result_r = (
+                    TP1_PARTIAL
+                    * TP1_R
+                    +
+                    remaining_r
+                )
+
+            else:
+
+                result_r = raw_r
+
 
     else:
 
-        result_r = -1
+        result_r = 0.0
 
 
     trade = {
 
         "event_id":
-            state.get(
-                "event_id",
-                ""
-            ),
+            event_id,
 
         "symbol":
             SYMBOL,
 
+        "strategy":
+            "V4_RANGE_LIQUIDITY",
+
         "direction":
-            state.get(
-                "direction",
-                ""
-            ),
+            direction,
 
         "entry":
-            float(
-                state.get(
-                    "entry",
-                    0
-                )
-            ),
+            entry,
 
         "stop_loss":
-            float(
-                state.get(
-                    "stop_loss",
-                    0
-                )
-            ),
+            stop,
 
         "tp1":
-            float(
-                state.get(
-                    "tp1",
-                    0
-                )
-            ),
+            tp1,
 
         "tp2":
-            float(
-                state.get(
-                    "tp2",
-                    0
-                )
-            ),
+            tp2,
 
         "level":
             float(
                 state.get(
                     "level",
+                    0
+                )
+            ),
+
+        "range_high":
+            float(
+                state.get(
+                    "range_high",
+                    0
+                )
+            ),
+
+        "range_low":
+            float(
+                state.get(
+                    "range_low",
                     0
                 )
             ),
@@ -1071,6 +1425,22 @@ def record_completed_trade(
             float(
                 state.get(
                     "volume_ratio",
+                    0
+                )
+            ),
+
+        "range_width_pct":
+            float(
+                state.get(
+                    "range_width_pct",
+                    0
+                )
+            ),
+
+        "reward_r":
+            float(
+                state.get(
+                    "reward_r",
                     0
                 )
             ),
@@ -1099,11 +1469,22 @@ def record_completed_trade(
                 )
             ),
 
+        "breakeven":
+            bool(
+                state.get(
+                    "breakeven",
+                    False
+                )
+            ),
+
         "outcome":
             outcome,
 
         "result_r":
             result_r,
+
+        "exit_price":
+            exit_price,
 
         "closed_at":
             pd.Timestamp.now(
@@ -1112,24 +1493,10 @@ def record_completed_trade(
     }
 
 
-    # Prevent duplicate history entries.
-
-    for existing in history:
-
-        if (
-            existing.get(
-                "event_id"
-            )
-            ==
-            trade["event_id"]
-        ):
-
-            return
-
-
     history.append(
         trade
     )
+
 
     save_history(
         history
@@ -1142,27 +1509,53 @@ def record_completed_trade(
 
 def create_chart(
     df,
-    signal,
-    entry,
-    stop_loss,
-    tp1,
-    tp2
+    signal
 ):
 
     chart_df = (
-        df.iloc[:-1]
-        .tail(60)
+        df
+        .tail(80)
         .copy()
-        .reset_index(drop=True)
+        .reset_index(
+            drop=True
+        )
     )
+
+
+    entry = float(
+        signal["entry"]
+    )
+
+
+    stop = float(
+        signal["stop"]
+    )
+
+
+    tp1 = float(
+        signal["tp1"]
+    )
+
+
+    tp2 = float(
+        signal["tp2"]
+    )
+
+
+    range_high = float(
+        signal["range_high"]
+    )
+
+
+    range_low = float(
+        signal["range_low"]
+    )
+
 
     direction = signal[
         "direction"
     ]
 
-    liquidity_level = float(
-        signal["level"]
-    )
 
     fig, ax = plt.subplots(
         figsize=(14, 8)
@@ -1170,7 +1563,7 @@ def create_chart(
 
 
     # ========================================================
-    # CANDLESTICKS
+    # CANDLES
     # ========================================================
 
     for i, candle in (
@@ -1193,11 +1586,13 @@ def create_chart(
             candle["close"]
         )
 
+
         candle_color = (
             "green"
             if close_price >= open_price
             else "red"
         )
+
 
         ax.plot(
             [i, i],
@@ -1209,15 +1604,18 @@ def create_chart(
             linewidth=1
         )
 
+
         body_low = min(
             open_price,
             close_price
         )
 
+
         body_height = abs(
             close_price
             - open_price
         )
+
 
         if body_height == 0:
 
@@ -1225,6 +1623,7 @@ def create_chart(
                 high_price
                 * 0.00001
             )
+
 
         ax.bar(
             i,
@@ -1236,16 +1635,31 @@ def create_chart(
 
 
     # ========================================================
-    # LIQUIDITY
+    # RANGE HIGH
     # ========================================================
 
     ax.axhline(
-        liquidity_level,
+        range_high,
         linestyle="--",
         linewidth=2,
         label=(
-            f"Liquidity "
-            f"${liquidity_level:,.2f}"
+            f"Range High "
+            f"${range_high:,.2f}"
+        )
+    )
+
+
+    # ========================================================
+    # RANGE LOW
+    # ========================================================
+
+    ax.axhline(
+        range_low,
+        linestyle="--",
+        linewidth=2,
+        label=(
+            f"Range Low "
+            f"${range_low:,.2f}"
         )
     )
 
@@ -1256,7 +1670,6 @@ def create_chart(
 
     ax.axhline(
         entry,
-        linestyle="-",
         linewidth=2,
         label=(
             f"Entry "
@@ -1266,16 +1679,16 @@ def create_chart(
 
 
     # ========================================================
-    # STOP LOSS
+    # STOP
     # ========================================================
 
     ax.axhline(
-        stop_loss,
+        stop,
         linestyle="--",
         linewidth=2,
         label=(
-            f"Stop Loss "
-            f"${stop_loss:,.2f}"
+            f"Stop "
+            f"${stop:,.2f}"
         )
     )
 
@@ -1311,93 +1724,53 @@ def create_chart(
 
 
     # ========================================================
-    # TRENDLINE
-    # ========================================================
-
-    highs, lows = find_swings(
-        chart_df
-    )
-
-    if direction == "BULLISH":
-
-        points = lows
-        label = "Bullish trendline"
-
-    else:
-
-        points = highs
-        label = "Bearish trendline"
-
-
-    if len(points) >= 2:
-
-        p1 = points[-2]
-        p2 = points[-1]
-
-        x1 = p1["index"]
-        x2 = p2["index"]
-
-        y1 = p1["price"]
-        y2 = p2["price"]
-
-        if x2 != x1:
-
-            slope = (
-                y2 - y1
-            ) / (
-                x2 - x1
-            )
-
-            x3 = (
-                len(chart_df) - 1
-            )
-
-            y3 = (
-                y2
-                + slope
-                * (x3 - x2)
-            )
-
-            ax.plot(
-                [x1, x2, x3],
-                [y1, y2, y3],
-                linewidth=3,
-                label=label
-            )
-
-
-    # ========================================================
     # SWEEP MARKER
     # ========================================================
 
     sweep_time = signal[
-        "time"
+        "sweep_time"
     ]
 
-    sweep_rows = chart_df[
+
+    matches = chart_df[
         chart_df["time"]
-        == sweep_time
+        ==
+        sweep_time
     ]
 
-    if not sweep_rows.empty:
+
+    if not matches.empty:
 
         sweep_index = int(
-            sweep_rows.index[0]
+            matches.index[0]
         )
 
-        sweep_price = float(
-            chart_df.iloc[
-                sweep_index
-            ]["close"]
-        )
+
+        sweep = chart_df.iloc[
+            sweep_index
+        ]
+
+
+        if direction == "BEARISH":
+
+            marker_price = float(
+                sweep["high"]
+            )
+
+        else:
+
+            marker_price = float(
+                sweep["low"]
+            )
+
 
         ax.scatter(
             sweep_index,
-            sweep_price,
-            s=150,
+            marker_price,
+            s=180,
             marker="*",
             zorder=5,
-            label="Liquidity sweep"
+            label="Liquidity Sweep"
         )
 
 
@@ -1407,33 +1780,39 @@ def create_chart(
 
     ax.set_title(
         (
-            f"BTCUSDT 5m "
-            f"Liquidity Sweep — "
+            f"BTCUSDT 5m V4 "
+            f"Range Liquidity Sweep — "
             f"{direction}"
         ),
         fontsize=16,
         fontweight="bold"
     )
 
+
     ax.set_xlabel(
         "Candles"
     )
 
+
     ax.set_ylabel(
         "Price (USDT)"
     )
+
 
     ax.grid(
         True,
         alpha=0.2
     )
 
+
     ax.legend(
         loc="best",
         fontsize=9
     )
 
+
     plt.tight_layout()
+
 
     plt.savefig(
         CHART_FILE,
@@ -1441,9 +1820,322 @@ def create_chart(
         bbox_inches="tight"
     )
 
+
     plt.close()
 
+
     return CHART_FILE
+
+
+# ============================================================
+# CREATE PAPER TRADE
+# ============================================================
+
+def create_trade(
+    df,
+    signal,
+    previous_state
+):
+
+    direction = signal[
+        "direction"
+    ]
+
+
+    entry = float(
+        signal["entry"]
+    )
+
+
+    stop = float(
+        signal["stop"]
+    )
+
+
+    tp1 = float(
+        signal["tp1"]
+    )
+
+
+    tp2 = float(
+        signal["tp2"]
+    )
+
+
+    range_high = float(
+        signal["range_high"]
+    )
+
+
+    range_low = float(
+        signal["range_low"]
+    )
+
+
+    volume = float(
+        signal["volume_ratio"]
+    )
+
+
+    reward_r = float(
+        signal["reward_r"]
+    )
+
+
+    sweep_time = str(
+        signal["sweep_time"]
+    )
+
+
+    confirmation_time = str(
+        signal["signal_time"]
+    )
+
+
+    # ========================================================
+    # EVENT ID
+    # ========================================================
+
+    event_id = (
+
+        f"{sweep_time}|"
+
+        f"{confirmation_time}|"
+
+        f"{direction}|"
+
+        f"{range_high:.2f}|"
+
+        f"{range_low:.2f}"
+    )
+
+
+    # ========================================================
+    # STATE
+    # ========================================================
+
+    state = {
+
+        "active":
+            True,
+
+        "last_heartbeat":
+            previous_state.get(
+                "last_heartbeat",
+                ""
+            ),
+
+        "last_processed_event_id":
+            event_id,
+
+        "event_id":
+            event_id,
+
+        "direction":
+            direction,
+
+        "entry":
+            entry,
+
+        "stop_loss":
+            stop,
+
+        "original_stop_loss":
+            stop,
+
+        "tp1":
+            tp1,
+
+        "tp2":
+            tp2,
+
+        # Keep the range high as the reference
+        # level for bearish and range low for bullish.
+
+        "level":
+            (
+                range_high
+                if direction == "BEARISH"
+                else range_low
+            ),
+
+        "range_high":
+            range_high,
+
+        "range_low":
+            range_low,
+
+        "sweep_time":
+            sweep_time,
+
+        "confirmation_time":
+            confirmation_time,
+
+        "volume_ratio":
+            volume,
+
+        "range_width_pct":
+            float(
+                signal[
+                    "range_width_pct"
+                ]
+            ),
+
+        "reward_r":
+            reward_r,
+
+        "tp1_hit":
+            False,
+
+        "tp2_hit":
+            False,
+
+        "sl_hit":
+            False,
+
+        "breakeven":
+            False,
+
+        "bars_in_trade":
+            0
+    }
+
+
+    emoji = (
+        "🔴"
+        if direction == "BEARISH"
+        else "🟢"
+    )
+
+
+    # ========================================================
+    # TELEGRAM SETUP MESSAGE
+    # ========================================================
+
+    message = f"""
+{emoji} BTC V4 PAPER SETUP
+
+Strategy:
+Range Liquidity Sweep
+
+Direction:
+{direction}
+
+━━━━━━━━━━━━━━━━━━
+
+📦 RANGE
+
+High:
+${range_high:,.2f}
+
+Low:
+${range_low:,.2f}
+
+Range width:
+{signal["range_width_pct"] * 100:.2f}%
+
+━━━━━━━━━━━━━━━━━━
+
+💧 LIQUIDITY SWEEP
+
+Sweep:
+{sweep_time}
+
+Volume:
+{volume:.2f}x average
+
+Confirmation:
+{confirmation_time}
+
+━━━━━━━━━━━━━━━━━━
+
+📍 ENTRY
+
+${entry:,.2f}
+
+🛑 STOP LOSS
+
+${stop:,.2f}
+
+🎯 TP1
+
+${tp1:,.2f}
+
+🎯 TP2
+
+${tp2:,.2f}
+
+Planned reward:
+{reward_r:.2f}R
+
+━━━━━━━━━━━━━━━━━━
+
+🤖 PAPER TRADE
+
+Position model:
+
+50% → TP1
+50% → TP2
+
+After TP1:
+SL → breakeven
+
+━━━━━━━━━━━━━━━━━━
+
+⚠️ MANUAL TRADE ONLY
+
+No real order has been placed.
+"""
+
+
+    # ========================================================
+    # CHART
+    # ========================================================
+
+    chart_file = create_chart(
+        df,
+        signal
+    )
+
+
+    telegram(
+        message
+    )
+
+
+    caption = (
+        f"{emoji} BTC V4 "
+        f"{direction} PAPER SETUP\n\n"
+
+        f"Entry: "
+        f"${entry:,.2f}\n"
+
+        f"SL: "
+        f"${stop:,.2f}\n"
+
+        f"TP1: "
+        f"${tp1:,.2f}\n"
+
+        f"TP2: "
+        f"${tp2:,.2f}\n\n"
+
+        f"Volume: "
+        f"{volume:.2f}x\n"
+
+        f"Range: "
+        f"{signal['range_width_pct'] * 100:.2f}%\n\n"
+
+        f"🤖 V4 paper tracker active"
+    )
+
+
+    send_chart(
+        chart_file,
+        caption
+    )
+
+
+    return state
 
 
 # ============================================================
@@ -1466,38 +2158,71 @@ def monitor_trade(
         "direction"
     ]
 
+
     entry = float(
         state["entry"]
     )
 
-    stop_loss = float(
-        state["stop_loss"]
+
+    original_stop = float(
+        state[
+            "original_stop_loss"
+        ]
     )
+
+
+    current_stop = float(
+        state[
+            "stop_loss"
+        ]
+    )
+
 
     tp1 = float(
         state["tp1"]
     )
+
 
     tp2 = float(
         state["tp2"]
     )
 
 
-    # Latest completed candle.
+    # --------------------------------------------------------
+    # Only latest completed candle.
+    # --------------------------------------------------------
 
     candle = df.iloc[
-        -2
+        -1
     ]
+
 
     high = float(
         candle["high"]
     )
 
+
     low = float(
         candle["low"]
     )
 
-    changed = False
+
+    close = float(
+        candle["close"]
+    )
+
+
+    state[
+        "bars_in_trade"
+    ] = int(
+        state.get(
+            "bars_in_trade",
+            0
+        )
+    ) + 1
+
+
+    changed = True
 
 
     # ========================================================
@@ -1506,112 +2231,240 @@ def monitor_trade(
 
     if direction == "BULLISH":
 
-        # Stop loss first.
+        # ----------------------------------------------------
+        # STOP
+        # ----------------------------------------------------
 
-        if (
-            not state["sl_hit"]
-            and low <= stop_loss
-        ):
+        if low <= current_stop:
 
-            telegram(
-                f"""
-🔴 BTC PAPER TRADE UPDATE
+            if state.get(
+                "breakeven",
+                False
+            ):
 
-BULLISH setup
+                telegram(
+                    f"""
+🟡 BTC V4 PAPER TRADE
+
+BULLISH
+
+TP1 was already hit.
+
+Price returned to entry.
+
+⚖️ BREAKEVEN EXIT
+
+Entry:
+${entry:,.2f}
+
+Exit:
+${entry:,.2f}
+
+Result:
++{TP1_PARTIAL * TP1_R:.1f}R
+
+Paper trade closed.
+"""
+                )
+
+
+                record_completed_trade(
+                    state,
+                    "TP1_BE",
+                    entry
+                )
+
+            else:
+
+                telegram(
+                    f"""
+🔴 BTC V4 PAPER TRADE
+
+BULLISH
 
 🛑 STOP LOSS HIT
 
-Entry: ${entry:,.2f}
-Stop Loss: ${stop_loss:,.2f}
-TP1: ${tp1:,.2f}
-TP2: ${tp2:,.2f}
+Entry:
+${entry:,.2f}
 
-Result: -1R
+Stop:
+${current_stop:,.2f}
 
-The bullish paper trade is closed.
+TP1:
+${tp1:,.2f}
+
+TP2:
+${tp2:,.2f}
+
+Result:
+-1R
+
+Paper trade closed.
 """
-            )
-
-            state["sl_hit"] = True
-
-            state["active"] = False
-
-            record_completed_trade(
-                state,
-                "SL"
-            )
-
-            changed = True
-
-            return changed
+                )
 
 
+                state[
+                    "sl_hit"
+                ] = True
+
+
+                record_completed_trade(
+                    state,
+                    "SL",
+                    current_stop
+                )
+
+
+            state[
+                "active"
+            ] = False
+
+
+            return True
+
+
+        # ----------------------------------------------------
         # TP1
+        # ----------------------------------------------------
 
         if (
-            not state["tp1_hit"]
-            and high >= tp1
+            not state[
+                "tp1_hit"
+            ]
+            and
+            high >= tp1
         ):
+
+            state[
+                "tp1_hit"
+            ] = True
+
+
+            if MOVE_SL_TO_BREAKEVEN:
+
+                state[
+                    "stop_loss"
+                ] = entry
+
+                state[
+                    "breakeven"
+                ] = True
+
 
             telegram(
                 f"""
-🟢 BTC PAPER TRADE UPDATE
+🟢 BTC V4 PAPER TRADE
 
-BULLISH setup
+BULLISH
 
 🎯 TP1 HIT
 
-Entry: ${entry:,.2f}
-TP1: ${tp1:,.2f}
-TP2: ${tp2:,.2f}
+Entry:
+${entry:,.2f}
 
-TP1 = +1R
+TP1:
+${tp1:,.2f}
 
-Paper trade remains active
-for TP2.
+TP2:
+${tp2:,.2f}
+
+50% position:
++1R
+
+Remaining:
+50%
+
+🛡️ Stop moved to breakeven.
+
+Paper trade remains active.
 """
             )
 
-            state["tp1_hit"] = True
 
-            changed = True
+            save_state(
+                state
+            )
 
 
+        # ----------------------------------------------------
         # TP2
+        # ----------------------------------------------------
 
         if (
-            not state["tp2_hit"]
-            and high >= tp2
+            not state[
+                "tp2_hit"
+            ]
+            and
+            low < tp2 + (
+                tp2 * 0.0000001
+            )
+            and
+            high >= tp2
         ):
+
+            # This branch is intentionally
+            # replaced below for direction handling.
+            pass
+
+
+        if (
+            not state[
+                "tp2_hit"
+            ]
+            and
+            high >= tp2
+        ):
+
+            state[
+                "tp2_hit"
+            ] = True
+
 
             telegram(
                 f"""
-🟢 BTC PAPER TRADE UPDATE
+🟢 BTC V4 PAPER TRADE
 
-BULLISH setup
+BULLISH
 
 🎯🎯 TP2 HIT
 
-Entry: ${entry:,.2f}
-TP1: ${tp1:,.2f}
-TP2: ${tp2:,.2f}
+Entry:
+${entry:,.2f}
 
-Result: +2R
+TP1:
+${tp1:,.2f}
 
-The bullish paper trade is complete.
+TP2:
+${tp2:,.2f}
+
+50% at TP1:
++0.5R
+
+50% at TP2:
++1.0R
+
+Total:
++1.5R
+
+Paper trade complete.
 """
             )
 
-            state["tp2_hit"] = True
-
-            state["active"] = False
 
             record_completed_trade(
                 state,
-                "TP2"
+                "TP2",
+                tp2
             )
 
-            changed = True
+
+            state[
+                "active"
+            ] = False
+
+
+            return True
 
 
     # ========================================================
@@ -1620,406 +2473,278 @@ The bullish paper trade is complete.
 
     else:
 
-        # Stop loss first.
+        # ----------------------------------------------------
+        # STOP
+        # ----------------------------------------------------
 
-        if (
-            not state["sl_hit"]
-            and high >= stop_loss
-        ):
+        if high >= current_stop:
 
-            telegram(
-                f"""
-🔴 BTC PAPER TRADE UPDATE
+            if state.get(
+                "breakeven",
+                False
+            ):
 
-BEARISH setup
+                telegram(
+                    f"""
+🟡 BTC V4 PAPER TRADE
+
+BEARISH
+
+TP1 was already hit.
+
+Price returned to entry.
+
+⚖️ BREAKEVEN EXIT
+
+Entry:
+${entry:,.2f}
+
+Exit:
+${entry:,.2f}
+
+Result:
++{TP1_PARTIAL * TP1_R:.1f}R
+
+Paper trade closed.
+"""
+                )
+
+
+                record_completed_trade(
+                    state,
+                    "TP1_BE",
+                    entry
+                )
+
+            else:
+
+                telegram(
+                    f"""
+🔴 BTC V4 PAPER TRADE
+
+BEARISH
 
 🛑 STOP LOSS HIT
 
-Entry: ${entry:,.2f}
-Stop Loss: ${stop_loss:,.2f}
-TP1: ${tp1:,.2f}
-TP2: ${tp2:,.2f}
+Entry:
+${entry:,.2f}
 
-Result: -1R
+Stop:
+${current_stop:,.2f}
 
-The bearish paper trade is closed.
+TP1:
+${tp1:,.2f}
+
+TP2:
+${tp2:,.2f}
+
+Result:
+-1R
+
+Paper trade closed.
 """
-            )
-
-            state["sl_hit"] = True
-
-            state["active"] = False
-
-            record_completed_trade(
-                state,
-                "SL"
-            )
-
-            changed = True
-
-            return changed
+                )
 
 
+                state[
+                    "sl_hit"
+                ] = True
+
+
+                record_completed_trade(
+                    state,
+                    "SL",
+                    current_stop
+                )
+
+
+            state[
+                "active"
+            ] = False
+
+
+            return True
+
+
+        # ----------------------------------------------------
         # TP1
+        # ----------------------------------------------------
 
         if (
-            not state["tp1_hit"]
-            and low <= tp1
+            not state[
+                "tp1_hit"
+            ]
+            and
+            low <= tp1
         ):
+
+            state[
+                "tp1_hit"
+            ] = True
+
+
+            if MOVE_SL_TO_BREAKEVEN:
+
+                state[
+                    "stop_loss"
+                ] = entry
+
+                state[
+                    "breakeven"
+                ] = True
+
 
             telegram(
                 f"""
-🔴 BTC PAPER TRADE UPDATE
+🔴 BTC V4 PAPER TRADE
 
-BEARISH setup
+BEARISH
 
 🎯 TP1 HIT
 
-Entry: ${entry:,.2f}
-TP1: ${tp1:,.2f}
-TP2: ${tp2:,.2f}
+Entry:
+${entry:,.2f}
 
-TP1 = +1R
+TP1:
+${tp1:,.2f}
 
-Paper trade remains active
-for TP2.
+TP2:
+${tp2:,.2f}
+
+50% position:
++1R
+
+Remaining:
+50%
+
+🛡️ Stop moved to breakeven.
+
+Paper trade remains active.
 """
             )
 
-            state["tp1_hit"] = True
 
-            changed = True
+            save_state(
+                state
+            )
 
 
+        # ----------------------------------------------------
         # TP2
+        # ----------------------------------------------------
 
         if (
-            not state["tp2_hit"]
-            and low <= tp2
+            not state[
+                "tp2_hit"
+            ]
+            and
+            low <= tp2
         ):
+
+            state[
+                "tp2_hit"
+            ] = True
+
 
             telegram(
                 f"""
-🔴 BTC PAPER TRADE UPDATE
+🔴 BTC V4 PAPER TRADE
 
-BEARISH setup
+BEARISH
 
 🎯🎯 TP2 HIT
 
-Entry: ${entry:,.2f}
-TP1: ${tp1:,.2f}
-TP2: ${tp2:,.2f}
+Entry:
+${entry:,.2f}
 
-Result: +2R
+TP1:
+${tp1:,.2f}
 
-The bearish paper trade is complete.
+TP2:
+${tp2:,.2f}
+
+50% at TP1:
++0.5R
+
+50% at TP2:
++1.0R
+
+Total:
++1.5R
+
+Paper trade complete.
 """
             )
 
-            state["tp2_hit"] = True
-
-            state["active"] = False
 
             record_completed_trade(
                 state,
-                "TP2"
+                "TP2",
+                tp2
             )
 
-            changed = True
+
+            state[
+                "active"
+            ] = False
+
+
+            return True
+
+
+    # ========================================================
+    # TIME EXIT
+    # ========================================================
+
+    if (
+        state[
+            "bars_in_trade"
+        ]
+        >= MAX_BARS_IN_TRADE
+    ):
+
+        telegram(
+            f"""
+🟡 BTC V4 PAPER TRADE
+
+TIME EXIT
+
+Direction:
+{direction}
+
+Entry:
+${entry:,.2f}
+
+Current price:
+${close:,.2f}
+
+Trade duration:
+{state["bars_in_trade"]} candles
+
+The maximum trade duration
+has been reached.
+
+Paper trade closed.
+"""
+        )
+
+
+        record_completed_trade(
+            state,
+            "TIME",
+            close
+        )
+
+
+        state[
+            "active"
+        ] = False
+
+
+        return True
 
 
     return changed
-
-
-# ============================================================
-# CREATE NEW PAPER TRADE
-# ============================================================
-
-def create_trade(
-    df,
-    signal,
-    previous_state
-):
-
-    direction = signal[
-        "direction"
-    ]
-
-    level = float(
-        signal["level"]
-    )
-
-    price = float(
-        signal["price"]
-    )
-
-    volume = float(
-        signal["volume_ratio"]
-    )
-
-
-    # ========================================================
-    # BEARISH
-    # ========================================================
-
-    if direction == "BEARISH":
-
-        emoji = "🔴"
-
-        entry = price
-
-        stop_loss = level
-
-        risk = abs(
-            entry - stop_loss
-        )
-
-        tp1 = (
-            entry - risk
-        )
-
-        tp2 = (
-            entry - (
-                risk * 2
-            )
-        )
-
-
-    # ========================================================
-    # BULLISH
-    # ========================================================
-
-    else:
-
-        emoji = "🟢"
-
-        entry = price
-
-        stop_loss = level
-
-        risk = abs(
-            entry - stop_loss
-        )
-
-        tp1 = (
-            entry + risk
-        )
-
-        tp2 = (
-            entry + (
-                risk * 2
-            )
-        )
-
-
-    # ========================================================
-    # EVENT ID
-    # ========================================================
-
-    event_id = (
-        f"{signal['time']}|"
-        f"{direction}|"
-        f"{level:.2f}"
-    )
-
-
-    # ========================================================
-    # STATE
-    # ========================================================
-
-    state = {
-
-        "active": True,
-
-        "last_heartbeat":
-            previous_state.get(
-                "last_heartbeat",
-                ""
-            ),
-
-        # IMPORTANT:
-        # Remember this setup permanently in state.
-
-        "last_processed_event_id":
-            event_id,
-
-        "event_id":
-            event_id,
-
-        "direction":
-            direction,
-
-        "entry":
-            entry,
-
-        "stop_loss":
-            stop_loss,
-
-        "tp1":
-            tp1,
-
-        "tp2":
-            tp2,
-
-        "level":
-            level,
-
-        "sweep_time": str(
-            signal["time"]
-        ),
-
-        "confirmation_time": str(
-            signal["confirmation_time"]
-        ),
-
-        "volume_ratio":
-            volume,
-
-        "tp1_hit": False,
-
-        "tp2_hit": False,
-
-        "sl_hit": False
-    }
-
-
-    # ========================================================
-    # TELEGRAM MESSAGE
-    # ========================================================
-
-    message = f"""
-{emoji} BTC LIQUIDITY SETUP
-
-Direction: {direction}
-
-Liquidity level:
-${level:,.2f}
-
-Current price:
-${price:,.2f}
-
-Sweep volume:
-{volume:.2f}x average
-
-Sweep candle:
-{signal["time"]}
-
-Confirmation:
-{CONFIRM_CANDLES} candles
-
-Confirmed at:
-{signal["confirmation_time"]}
-
-━━━━━━━━━━━━━━━━━━
-
-📍 REFERENCE ENTRY
-${entry:,.2f}
-
-🛑 STOP LOSS
-${stop_loss:,.2f}
-
-🎯 TP1
-${tp1:,.2f}
-
-🎯 TP2
-${tp2:,.2f}
-
-📊 RISK / REWARD
-
-1:1 → TP1
-1:2 → TP2
-
-━━━━━━━━━━━━━━━━━━
-
-🤖 PAPER TRADE TRACKER ACTIVE
-
-The bot will monitor:
-
-🎯 TP1
-🎯 TP2
-🛑 Stop Loss
-
-━━━━━━━━━━━━━━━━━━
-
-⚠️ MANUAL TRADE ONLY
-
-This is NOT a real trade.
-
-Review the setup before entering.
-"""
-
-
-    # ========================================================
-    # CHART
-    # ========================================================
-
-    chart_file = create_chart(
-        df,
-        signal,
-        entry,
-        stop_loss,
-        tp1,
-        tp2
-    )
-
-    print(
-        "Chart created."
-    )
-
-
-    # ========================================================
-    # SEND TEXT
-    # ========================================================
-
-    telegram(
-        message
-    )
-
-    print(
-        "Telegram text alert sent."
-    )
-
-
-    # ========================================================
-    # SEND CHART
-    # ========================================================
-
-    caption = (
-        f"{emoji} BTC "
-        f"{direction} PAPER SETUP\n\n"
-
-        f"Entry: "
-        f"${entry:,.2f}\n"
-
-        f"Stop Loss: "
-        f"${stop_loss:,.2f}\n"
-
-        f"TP1: "
-        f"${tp1:,.2f}\n"
-
-        f"TP2: "
-        f"${tp2:,.2f}\n\n"
-
-        f"Volume: "
-        f"{volume:.2f}x average\n\n"
-
-        f"🤖 Paper trade tracker active\n"
-
-        f"⚠️ Manual trade only"
-    )
-
-
-    send_chart(
-        chart_file,
-        caption
-    )
-
-    print(
-        "Chart sent to Telegram."
-    )
-
-
-    return state
 
 
 # ============================================================
@@ -2028,21 +2753,21 @@ Review the setup before entering.
 
 def send_eod_report():
 
-    print(
-        "Generating daily EOD paper-trading report..."
-    )
-
     history = load_history()
+
 
     now = pd.Timestamp.now(
         tz="UTC"
     )
 
+
     today = now.strftime(
         "%Y-%m-%d"
     )
 
+
     today_trades = []
+
 
     for trade in history:
 
@@ -2051,26 +2776,27 @@ def send_eod_report():
             ""
         )
 
+
         if not closed_at:
 
             continue
 
+
         try:
 
-            closed_date = (
-                pd.to_datetime(
-                    closed_at,
-                    utc=True
-                ).strftime(
-                    "%Y-%m-%d"
-                )
+            date = pd.to_datetime(
+                closed_at,
+                utc=True
+            ).strftime(
+                "%Y-%m-%d"
             )
 
         except Exception:
 
             continue
 
-        if closed_date == today:
+
+        if date == today:
 
             today_trades.append(
                 trade
@@ -2081,52 +2807,28 @@ def send_eod_report():
         today_trades
     )
 
-    tp1_hits = sum(
-        1
-        for t in today_trades
-        if t.get(
-            "tp1_hit",
-            False
-        )
-    )
-
-    tp2_hits = sum(
-        1
-        for t in today_trades
-        if t.get(
-            "tp2_hit",
-            False
-        )
-    )
-
-    sl_hits = sum(
-        1
-        for t in today_trades
-        if t.get(
-            "sl_hit",
-            False
-        )
-    )
-
 
     wins = sum(
         1
         for t in today_trades
-        if t.get(
-            "outcome"
-        ) in (
-            "TP1",
-            "TP2"
-        )
+        if float(
+            t.get(
+                "result_r",
+                0
+            )
+        ) > 0
     )
 
 
     losses = sum(
         1
         for t in today_trades
-        if t.get(
-            "outcome"
-        ) == "SL"
+        if float(
+            t.get(
+                "result_r",
+                0
+            )
+        ) < 0
     )
 
 
@@ -2141,11 +2843,43 @@ def send_eod_report():
     )
 
 
-    if total > 0:
+    tp1_hits = sum(
+        1
+        for t in today_trades
+        if t.get(
+            "tp1_hit",
+            False
+        )
+    )
+
+
+    tp2_hits = sum(
+        1
+        for t in today_trades
+        if t.get(
+            "tp2_hit",
+            False
+        )
+    )
+
+
+    sl_hits = sum(
+        1
+        for t in today_trades
+        if t.get(
+            "sl_hit",
+            False
+        )
+    )
+
+
+    if total:
 
         win_rate = (
-            wins / total
-        ) * 100
+            wins
+            / total
+            * 100
+        )
 
     else:
 
@@ -2155,15 +2889,17 @@ def send_eod_report():
     if total == 0:
 
         report = f"""
-📊 BTC DAILY PAPER-TRADE REPORT
+📊 BTC V4 DAILY PAPER REPORT
 
-Date: {today}
+Date:
+{today}
 
-No completed paper trades today.
-
-Signals are still being monitored.
+No completed trades today.
 
 ━━━━━━━━━━━━━━━━━━
+
+Strategy:
+V4 Range Liquidity Sweep
 
 Market:
 BTCUSDT
@@ -2180,9 +2916,10 @@ Status:
     else:
 
         report = f"""
-📊 BTC DAILY PAPER-TRADE REPORT
+📊 BTC V4 DAILY PAPER REPORT
 
-Date: {today}
+Date:
+{today}
 
 ━━━━━━━━━━━━━━━━━━
 
@@ -2191,10 +2928,10 @@ Date: {today}
 Completed trades:
 {total}
 
-Winning trades:
+Profitable:
 {wins}
 
-Losing trades:
+Losing:
 {losses}
 
 Win rate:
@@ -2210,17 +2947,23 @@ TP1 hits:
 TP2 hits:
 {tp2_hits}
 
-🛑 Stop Loss:
+🛑 Stop losses:
 {sl_hits}
 
 ━━━━━━━━━━━━━━━━━━
 
-📊 R RESULT
+📊 RESULT
 
 Total:
-{total_r:+.1f}R
+{total_r:+.2f}R
+
+Average:
+{total_r / total:+.3f}R
 
 ━━━━━━━━━━━━━━━━━━
+
+Strategy:
+V4 Range Liquidity Sweep
 
 Market:
 BTCUSDT
@@ -2228,23 +2971,12 @@ BTCUSDT
 Timeframe:
 5m
 
-🤖 Strategy:
-Liquidity Sweep + Volume
-+ Confirmation
-
-⚠️ PAPER TRADING ONLY
-
-This report measures the strategy
-without using real money.
+🤖 PAPER TRADING ONLY
 """
 
 
     telegram(
         report
-    )
-
-    print(
-        "EOD report sent."
     )
 
 
@@ -2255,12 +2987,13 @@ without using real money.
 def main():
 
     # ========================================================
-    # EOD MODE
+    # EOD
     # ========================================================
 
     if (
         len(sys.argv) > 1
-        and sys.argv[1].lower()
+        and
+        sys.argv[1].lower()
         == "--eod"
     ):
 
@@ -2270,19 +3003,29 @@ def main():
 
 
     print(
-        "BTC Liquidity Bot started"
+        "BTC V4 Liquidity Bot started"
     )
 
 
     # ========================================================
-    # GET DATA
+    # DATA
     # ========================================================
 
     df = get_data()
 
+
     print(
-        f"Loaded {len(df)} candles"
+        f"Loaded {len(df)} completed candles."
     )
+
+
+    if len(df) < 50:
+
+        print(
+            "Not enough completed candles."
+        )
+
+        return
 
 
     # ========================================================
@@ -2298,13 +3041,9 @@ def main():
 
     try:
 
-        heartbeat_sent = (
-            send_heartbeat(
-                state
-            )
-        )
-
-        if heartbeat_sent:
+        if send_heartbeat(
+            state
+        ):
 
             save_state(
                 state
@@ -2323,7 +3062,7 @@ def main():
 
 
     # ========================================================
-    # MONITOR ACTIVE TRADE
+    # ACTIVE PAPER TRADE
     # ========================================================
 
     if state.get(
@@ -2331,13 +3070,15 @@ def main():
     ):
 
         print(
-            "Active paper trade found."
+            "Active V4 paper trade found."
         )
+
 
         changed = monitor_trade(
             df,
             state
         )
+
 
         if changed:
 
@@ -2352,17 +3093,18 @@ def main():
         else:
 
             print(
-                "Active paper trade still running."
+                "Active paper trade remains open."
             )
 
-        # Do not create another trade
+
+        # Never search for another setup
         # while one is active.
 
         return
 
 
     # ========================================================
-    # FIND NEW SIGNAL
+    # FIND NEW V4 SIGNAL
     # ========================================================
 
     signal = analyze(
@@ -2373,25 +3115,39 @@ def main():
     if signal is None:
 
         print(
-            "No new confirmed liquidity sweep."
+            "No new confirmed V4 setup."
         )
 
         return
 
 
+    print(
+        "V4 signal detected:",
+        signal["direction"],
+        signal["signal_time"]
+    )
+
+
     # ========================================================
-    # BUILD EVENT ID
+    # EVENT ID
     # ========================================================
 
     event_id = (
-        f"{signal['time']}|"
+
+        f"{signal['sweep_time']}|"
+
+        f"{signal['signal_time']}|"
+
         f"{signal['direction']}|"
-        f"{float(signal['level']):.2f}"
+
+        f"{float(signal['range_high']):.2f}|"
+
+        f"{float(signal['range_low']):.2f}"
     )
 
 
     print(
-        "Signal detected:",
+        "Event ID:",
         event_id
     )
 
@@ -2406,18 +3162,18 @@ def main():
     ):
 
         print(
-            "Signal already processed."
+            "V4 signal already processed."
         )
 
         print(
-            "No duplicate paper trade will be created."
+            "No duplicate alert."
         )
 
         return
 
 
     # ========================================================
-    # CREATE PAPER TRADE
+    # CREATE TRADE
     # ========================================================
 
     new_state = create_trade(
@@ -2428,7 +3184,7 @@ def main():
 
 
     # ========================================================
-    # SAVE STATE
+    # SAVE
     # ========================================================
 
     save_state(
@@ -2437,12 +3193,15 @@ def main():
 
 
     print(
-        "New paper trade created."
+        "V4 paper trade created."
     )
 
     print(
-        "Alert sent, chart sent "
-        "and trade state saved."
+        "Telegram alert sent."
+    )
+
+    print(
+        "Trade state saved."
     )
 
 
