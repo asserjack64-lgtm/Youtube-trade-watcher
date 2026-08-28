@@ -1,0 +1,38 @@
+name: Strategy Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days of BTCUSDT 5m history to test"
+        required: true
+        default: "180"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas
+
+      - name: Run strategy backtest
+        run: |
+          python backtest.py --days "${{ inputs.days }}"
+
+      - name: Upload trade results
+        uses: actions/upload-artifact@v4
+        with:
+          name: strategy-backtest-results
+          path: backtest_trades.csv
+          if-no-files-found: ignore
