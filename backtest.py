@@ -7,40 +7,100 @@ import requests
 
 
 # ============================================================
-# VERSION 2 — BEARISH-ONLY RANGE LIQUIDITY SWEEP
+# BASIC SETTINGS
 # ============================================================
 
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 
-# Range
-RANGE_CANDLES = 24              # 2 hours
-MAX_RANGE_WIDTH_PCT = 0.015     # <= 1.5%
-
-# Sweep
-SWEEP_PCT = 0.0003              # 0.03% beyond range
-SL_BUFFER_PCT = 0.0005          # 0.05% beyond sweep extreme
-
-# Stronger signal-quality filter
-VOLUME_LOOKBACK = 20
-MIN_VOLUME_RATIO = 1.50         # V2: raised from 1.20x
-
-# Stronger bearish confirmation
-CONFIRM_BODY_MIN_PCT = 0.0008   # V2: 0.08% bearish body
-
-# Trade management
-MAX_BARS_IN_TRADE = 72          # 6 hours
-MIN_TP2_R = 1.50                 # minimum planned reward
-TARGET_R = 2.0
-
-
-API_URL = (
-    "https://data-api.binance.vision/api/v3/klines"
-)
+API_URL = "https://data-api.binance.vision/api/v3/klines"
 
 
 # ============================================================
-# DOWNLOAD BINANCE DATA
+# BASE STRATEGY
+# ============================================================
+
+RANGE_CANDLES = 24
+
+MAX_RANGE_WIDTH_PCT = 0.015
+
+SWEEP_PCT = 0.0003
+
+SL_BUFFER_PCT = 0.0005
+
+VOLUME_LOOKBACK = 20
+
+MIN_VOLUME_RATIO = 1.50
+
+CONFIRM_BODY_MIN_PCT = 0.0008
+
+MAX_BARS_IN_TRADE = 72
+
+
+# ============================================================
+# TRADE MANAGEMENT
+# ============================================================
+
+TP1_R = 1.0
+TP2_R = 2.0
+
+TP1_PARTIAL = 0.50
+
+MOVE_SL_TO_BREAKEVEN = True
+
+
+# ============================================================
+# PARAMETER TESTS
+# ============================================================
+
+TEST_CONFIGS = [
+
+    {
+        "name": "BASE",
+        "volume": 1.50,
+        "body": 0.0008,
+        "range": 0.015,
+    },
+
+    {
+        "name": "LOWER_VOLUME",
+        "volume": 1.30,
+        "body": 0.0008,
+        "range": 0.015,
+    },
+
+    {
+        "name": "HIGHER_VOLUME",
+        "volume": 1.80,
+        "body": 0.0008,
+        "range": 0.015,
+    },
+
+    {
+        "name": "LOWER_BODY",
+        "volume": 1.50,
+        "body": 0.0005,
+        "range": 0.015,
+    },
+
+    {
+        "name": "TIGHT_RANGE",
+        "volume": 1.50,
+        "body": 0.0008,
+        "range": 0.012,
+    },
+
+    {
+        "name": "STRICT",
+        "volume": 1.80,
+        "body": 0.0010,
+        "range": 0.012,
+    },
+]
+
+
+# ============================================================
+# DOWNLOAD DATA
 # ============================================================
 
 def fetch_klines(start_ms, end_ms):
@@ -74,9 +134,7 @@ def fetch_klines(start_ms, end_ms):
 
         rows.extend(batch)
 
-        last_open = int(
-            batch[-1][0]
-        )
+        last_open = int(batch[-1][0])
 
         next_cursor = (
             last_open
@@ -123,13 +181,16 @@ def fetch_klines(start_ms, end_ms):
         )
 
 
-    for column in [
+    numeric_columns = [
         "open",
         "high",
         "low",
         "close",
         "volume",
-    ]:
+    ]
+
+
+    for column in numeric_columns:
 
         df[column] = pd.to_numeric(
             df[column],
@@ -153,20 +214,13 @@ def fetch_klines(start_ms, end_ms):
 
     df = (
         df
-        .drop_duplicates(
-            "open_time"
-        )
-        .sort_values(
-            "open_time"
-        )
-        .reset_index(
-            drop=True
-        )
+        .drop_duplicates("open_time")
+        .sort_values("open_time")
+        .reset_index(drop=True)
     )
 
 
-    # Never backtest the currently
-    # forming candle.
+    # Never use the currently forming candle.
 
     now = pd.Timestamp.now(
         tz="UTC"
@@ -174,45 +228,48 @@ def fetch_klines(start_ms, end_ms):
 
     df = df[
         df["close_time"] <= now
-    ].reset_index(
-        drop=True
-    )
+    ].reset_index(drop=True)
 
 
     return df
 
 
 # ============================================================
-# VOLUME RATIO
+# VOLUME
 # ============================================================
 
 def volume_ratio(
     df,
-    index
+    index,
 ):
 
     start = max(
         0,
-        index - VOLUME_LOOKBACK
+        index - VOLUME_LOOKBACK,
     )
+
 
     previous = df.iloc[
         start:index
     ]["volume"]
 
 
-    if (
-        len(previous) < 5
-        or previous.mean() <= 0
-    ):
+    if len(previous) < 5:
+
+        return 0.0
+
+
+    average = previous.mean()
+
+
+    if average <= 0:
 
         return 0.0
 
 
     return float(
         df.iloc[index]["volume"]
-        /
-        previous.mean()
+        / average
     )
 
 
@@ -222,36 +279,17 @@ def volume_ratio(
 
 def find_signal(
     df,
-    i
+    i,
+    config,
 ):
-
-    """
-    V2 bearish-only model.
-
-    1. Establish a 2-hour range.
-    2. Price sweeps above range high.
-    3. Sweep candle closes back inside range.
-    4. Next candle confirms with strong bearish body.
-    5. Sweep volume >= 1.50x average.
-    6. Entry = confirmation close.
-    7. SL = sweep high + buffer.
-    8. TP1 = 1R.
-    9. TP2 = 2R, but only if >= 1.5R available.
-    """
-
-
-    # i = confirmation candle
 
     sweep_i = i - 1
 
 
-    minimum_history = (
+    if sweep_i < (
         RANGE_CANDLES
         + VOLUME_LOOKBACK
-    )
-
-
-    if sweep_i < minimum_history:
+    ):
 
         return None
 
@@ -261,8 +299,7 @@ def find_signal(
     # --------------------------------------------------------
 
     range_df = df.iloc[
-        sweep_i
-        - RANGE_CANDLES:
+        sweep_i - RANGE_CANDLES:
         sweep_i
     ]
 
@@ -277,37 +314,34 @@ def find_signal(
     )
 
 
-    mid = (
+    midpoint = (
         range_high
         + range_low
     ) / 2
 
 
-    if mid <= 0:
+    if midpoint <= 0:
 
         return None
 
 
-    range_width_pct = (
+    range_width = (
         range_high
         - range_low
-    ) / mid
+    ) / midpoint
 
 
-    if (
-        range_width_pct
-        > MAX_RANGE_WIDTH_PCT
-    ):
+    if range_width > config["range"]:
 
         return None
 
+
+    # --------------------------------------------------------
+    # SWEEP CANDLE
+    # --------------------------------------------------------
 
     sweep = df.iloc[
         sweep_i
-    ]
-
-    confirm = df.iloc[
-        i
     ]
 
 
@@ -321,18 +355,8 @@ def find_signal(
     )
 
 
-    confirm_open = float(
-        confirm["open"]
-    )
-
-
-    confirm_close = float(
-        confirm["close"]
-    )
-
-
     # --------------------------------------------------------
-    # BEARISH SWEEP
+    # BEARISH LIQUIDITY SWEEP
     # --------------------------------------------------------
 
     bearish_sweep = (
@@ -358,18 +382,46 @@ def find_signal(
 
 
     # --------------------------------------------------------
-    # STRONG BEARISH CONFIRMATION
+    # VOLUME
     # --------------------------------------------------------
 
-    confirm_body_pct = (
+    vr = volume_ratio(
+        df,
+        sweep_i,
+    )
 
+
+    if vr < config["volume"]:
+
+        return None
+
+
+    # --------------------------------------------------------
+    # CONFIRMATION CANDLE
+    # --------------------------------------------------------
+
+    confirm = df.iloc[
+        i
+    ]
+
+
+    confirm_open = float(
+        confirm["open"]
+    )
+
+
+    confirm_close = float(
+        confirm["close"]
+    )
+
+
+    bearish_body = (
         confirm_open
         - confirm_close
-
     ) / confirm_open
 
 
-    bearish_confirm = (
+    bearish_confirmation = (
 
         confirm_close
         <
@@ -383,9 +435,8 @@ def find_signal(
 
         and
 
-        confirm_body_pct
-        >=
-        CONFIRM_BODY_MIN_PCT
+        bearish_body
+        >= config["body"]
 
         and
 
@@ -398,32 +449,19 @@ def find_signal(
     )
 
 
-    if not bearish_confirm:
+    if not bearish_confirmation:
 
         return None
 
 
     # --------------------------------------------------------
-    # VOLUME FILTER
-    # --------------------------------------------------------
-
-    vr = volume_ratio(
-        df,
-        sweep_i
-    )
-
-
-    if vr < MIN_VOLUME_RATIO:
-
-        return None
-
-
-    # --------------------------------------------------------
-    # TRADE LEVELS
+    # ENTRY
     # --------------------------------------------------------
 
     entry = confirm_close
 
+
+    # SL goes beyond actual sweep high.
 
     stop = (
         sweep_high
@@ -444,46 +482,67 @@ def find_signal(
         return None
 
 
+    # --------------------------------------------------------
+    # TP1
+    # --------------------------------------------------------
+
     tp1 = (
         entry
-        - risk
-    )
-
-
-    two_r_target = (
-        entry
         - (
-            TARGET_R
-            * risk
+            risk
+            * TP1_R
         )
     )
 
 
-    # TP2 uses the farther target:
-    #
-    # 2R OR opposite side of range
+    # --------------------------------------------------------
+    # TP2
+    # --------------------------------------------------------
 
-    tp2 = min(
-        two_r_target,
-        range_low
+    theoretical_tp2 = (
+        entry
+        - (
+            risk
+            * TP2_R
+        )
     )
 
 
-    planned_reward_r = (
+    # Opposite side of range.
 
+    opposite_range = range_low
+
+
+    # We require the range target to offer
+    # at least 1.5R.
+
+    range_reward_r = (
         entry
-        - tp2
-
+        - opposite_range
     ) / risk
 
 
-    # Require at least 1.5R
-    # planned reward.
+    if range_reward_r < 1.5:
 
-    if (
-        planned_reward_r
-        < MIN_TP2_R
-    ):
+        return None
+
+
+    # Use the nearer of 2R and opposite
+    # range target.
+
+    tp2 = max(
+        theoretical_tp2,
+        opposite_range,
+    )
+
+
+    actual_reward_r = (
+        entry
+        - tp2
+    ) / risk
+
+
+    if actual_reward_r < 1.5:
 
         return None
 
@@ -494,23 +553,16 @@ def find_signal(
             "BEARISH",
 
         "signal_time":
-            confirm[
-                "open_time"
-            ],
+            confirm["open_time"],
 
         "sweep_time":
-            sweep[
-                "open_time"
-            ],
+            sweep["open_time"],
 
         "range_high":
             range_high,
 
         "range_low":
             range_low,
-
-        "range_width_pct":
-            range_width_pct,
 
         "entry":
             entry,
@@ -527,11 +579,11 @@ def find_signal(
         "volume_ratio":
             vr,
 
-        "confirm_body_pct":
-            confirm_body_pct,
+        "range_width_pct":
+            range_width,
 
         "planned_reward_r":
-            planned_reward_r,
+            actual_reward_r,
     }
 
 
@@ -542,14 +594,14 @@ def find_signal(
 def simulate_trade(
     df,
     entry_i,
-    signal
+    signal,
 ):
 
     entry = float(
         signal["entry"]
     )
 
-    stop = float(
+    original_stop = float(
         signal["stop"]
     )
 
@@ -562,22 +614,34 @@ def simulate_trade(
     )
 
 
+    risk = (
+        original_stop
+        - entry
+    )
+
+
     tp1_hit = False
+
+    breakeven = False
 
     bars = 0
 
 
+    # Track realized and remaining R.
+
+    realized_r = 0.0
+
+    remaining_fraction = 1.0
+
+
     for j in range(
         entry_i + 1,
-        len(df)
+        len(df),
     ):
 
         bars += 1
 
-
-        candle = df.iloc[
-            j
-        ]
+        candle = df.iloc[j]
 
 
         high = float(
@@ -588,45 +652,66 @@ def simulate_trade(
             candle["low"]
         )
 
-        close = float(
-            candle["close"]
+
+        # ====================================================
+        # STOP
+        # ====================================================
+
+        current_stop = (
+            entry
+            if breakeven
+            else original_stop
         )
 
 
-        # ----------------------------------------------------
-        # CONSERVATIVE RULE
-        # ----------------------------------------------------
-        #
-        # If SL and TP are both touched
-        # in the same candle, SL wins.
-        #
+        if high >= current_stop:
 
-        if high >= stop:
+            # If TP1 already occurred, remaining
+            # 50% closes at breakeven.
+
+            if tp1_hit:
+
+                # Remaining 50% = 0R.
+
+                final_r = realized_r
+
+            else:
+
+                # Entire position loses 1R.
+
+                final_r = -1.0
+
 
             return {
 
                 "outcome":
-                    "SL",
+                    "SL"
+                    if not tp1_hit
+                    else "TP1_SL",
 
                 "r":
-                    -1.0,
+                    final_r,
 
                 "close_time":
-                    candle[
-                        "close_time"
-                    ],
+                    candle["close_time"],
 
                 "bars":
                     bars,
 
                 "tp1_hit":
                     tp1_hit,
+
+                "breakeven":
+                    breakeven,
+
+                "partial_realized_r":
+                    realized_r,
             }
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # TP1
-        # ----------------------------------------------------
+        # ====================================================
 
         if (
             not tp1_hit
@@ -636,11 +721,42 @@ def simulate_trade(
             tp1_hit = True
 
 
-        # ----------------------------------------------------
+            # 50% position closes at 1R.
+
+            realized_r += (
+                TP1_PARTIAL
+                * TP1_R
+            )
+
+
+            remaining_fraction = (
+                1
+                - TP1_PARTIAL
+            )
+
+
+            if MOVE_SL_TO_BREAKEVEN:
+
+                breakeven = True
+
+
+        # ====================================================
         # TP2
-        # ----------------------------------------------------
+        # ====================================================
 
         if low <= tp2:
+
+            remaining_r = (
+                remaining_fraction
+                * TP2_R
+            )
+
+
+            final_r = (
+                realized_r
+                + remaining_r
+            )
+
 
             return {
 
@@ -648,40 +764,58 @@ def simulate_trade(
                     "TP2",
 
                 "r":
-                    TARGET_R,
+                    final_r,
 
                 "close_time":
-                    candle[
-                        "close_time"
-                    ],
+                    candle["close_time"],
 
                 "bars":
                     bars,
 
                 "tp1_hit":
                     True,
+
+                "breakeven":
+                    breakeven,
+
+                "partial_realized_r":
+                    realized_r,
             }
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # TIME EXIT
-        # ----------------------------------------------------
+        # ====================================================
 
-        if (
-            bars
-            >= MAX_BARS_IN_TRADE
-        ):
+        if bars >= MAX_BARS_IN_TRADE:
 
-            r = (
-
-                entry
-                - close
-
-            ) / (
-
-                stop
-                - entry
+            close = float(
+                candle["close"]
             )
+
+
+            if tp1_hit:
+
+                remaining_r = (
+                    remaining_fraction
+                    *
+                    (
+                        entry - close
+                    )
+                    / risk
+                )
+
+
+                final_r = (
+                    realized_r
+                    + remaining_r
+                )
+
+            else:
+
+                final_r = (
+                    entry - close
+                ) / risk
 
 
             return {
@@ -690,24 +824,28 @@ def simulate_trade(
                     "TIME",
 
                 "r":
-                    r,
+                    final_r,
 
                 "close_time":
-                    candle[
-                        "close_time"
-                    ],
+                    candle["close_time"],
 
                 "bars":
                     bars,
 
                 "tp1_hit":
                     tp1_hit,
+
+                "breakeven":
+                    breakeven,
+
+                "partial_realized_r":
+                    realized_r,
             }
 
 
-    # --------------------------------------------------------
-    # OPEN AT END
-    # --------------------------------------------------------
+    # ========================================================
+    # END OF DATA
+    # ========================================================
 
     return {
 
@@ -718,15 +856,19 @@ def simulate_trade(
             0.0,
 
         "close_time":
-            df.iloc[-1][
-                "close_time"
-            ],
+            df.iloc[-1]["close_time"],
 
         "bars":
             bars,
 
         "tp1_hit":
             tp1_hit,
+
+        "breakeven":
+            breakeven,
+
+        "partial_realized_r":
+            realized_r,
     }
 
 
@@ -734,7 +876,10 @@ def simulate_trade(
 # RUN BACKTEST
 # ============================================================
 
-def run_backtest(df):
+def run_backtest(
+    df,
+    config,
+):
 
     trades = []
 
@@ -750,7 +895,8 @@ def run_backtest(df):
 
         signal = find_signal(
             df,
-            i
+            i,
+            config,
         )
 
 
@@ -764,7 +910,7 @@ def run_backtest(df):
         result = simulate_trade(
             df,
             i,
-            signal
+            signal,
         )
 
 
@@ -775,9 +921,7 @@ def run_backtest(df):
             **result,
 
             "entry_time":
-                df.iloc[i][
-                    "open_time"
-                ],
+                df.iloc[i]["open_time"],
         }
 
 
@@ -786,9 +930,7 @@ def run_backtest(df):
         )
 
 
-        # ----------------------------------------------------
-        # NO OVERLAPPING TRADES
-        # ----------------------------------------------------
+        # No overlapping trades.
 
         exit_i = (
             i
@@ -798,7 +940,7 @@ def run_backtest(df):
 
         i = max(
             i + 1,
-            exit_i + 1
+            exit_i + 1,
         )
 
 
@@ -808,52 +950,170 @@ def run_backtest(df):
 
 
 # ============================================================
-# SUMMARY
+# MAX CONSECUTIVE LOSSES
+# ============================================================
+
+def max_consecutive_losses(
+    trades,
+):
+
+    maximum = 0
+
+    current = 0
+
+
+    for r in trades["r"]:
+
+        if float(r) < 0:
+
+            current += 1
+
+            maximum = max(
+                maximum,
+                current,
+            )
+
+        else:
+
+            current = 0
+
+
+    return maximum
+
+
+# ============================================================
+# MAX DRAWDOWN
+# ============================================================
+
+def max_drawdown(
+    trades,
+):
+
+    equity = (
+        trades["r"]
+        .astype(float)
+        .cumsum()
+    )
+
+
+    peak = (
+        equity
+        .cummax()
+    )
+
+
+    drawdown = (
+        equity
+        - peak
+    )
+
+
+    return float(
+        drawdown.min()
+    )
+
+
+# ============================================================
+# MONTHLY PERFORMANCE
+# ============================================================
+
+def monthly_report(
+    trades,
+):
+
+    if trades.empty:
+
+        return
+
+
+    temp = trades.copy()
+
+
+    temp["month"] = (
+        pd.to_datetime(
+            temp["entry_time"],
+            utc=True,
+        ).dt.strftime(
+            "%Y-%m"
+        )
+    )
+
+
+    grouped = (
+        temp
+        .groupby("month")
+    )
+
+
+    print(
+        "\nMONTHLY PERFORMANCE"
+    )
+
+
+    print(
+        "-" * 70
+    )
+
+
+    for month, group in grouped:
+
+        count = len(group)
+
+        total_r = float(
+            group["r"]
+            .sum()
+        )
+
+
+        wins = int(
+            (
+                group["r"] > 0
+            ).sum()
+        )
+
+
+        losses = int(
+            (
+                group["r"] < 0
+            ).sum()
+        )
+
+
+        print(
+            f"{month}  "
+            f"trades={count:3d}  "
+            f"wins={wins:3d}  "
+            f"losses={losses:3d}  "
+            f"R={total_r:+7.2f}"
+        )
+
+
+# ============================================================
+# SUMMARIZE
 # ============================================================
 
 def summarize(
     trades,
-    df,
-    start_date,
-    end_date
+    config_name,
 ):
 
     print(
         "\n"
-        + "=" * 68
+        + "=" * 72
+    )
+
+    print(
+        f"BTCUSDT 5m V3 "
+        f"BEARISH RANGE LIQUIDITY BACKTEST"
+    )
+
+    print(
+        "=" * 72
     )
 
 
     print(
-        "BTCUSDT 5m V2 "
-        "BEARISH-ONLY "
-        "RANGE LIQUIDITY BACKTEST"
-    )
-
-
-    print(
-        "=" * 68
-    )
-
-
-    print(
-        f"Period:              "
-        f"{start_date} → {end_date}"
-    )
-
-
-    print(
-        f"Candles:             "
-        f"{len(df):,}"
-    )
-
-
-    print(
-        f"Filters:             "
-        f"volume >= "
-        f"{MIN_VOLUME_RATIO:.2f}x | "
-        f"body >= "
-        f"{CONFIRM_BODY_MIN_PCT * 100:.2f}%"
+        f"Configuration: {config_name}"
     )
 
 
@@ -863,27 +1123,15 @@ def summarize(
             "\nNO TRADES FOUND."
         )
 
-        print(
-            "Filters may be too strict."
-        )
-
-        print(
-            "=" * 68
-        )
-
         return
 
-
-    # ========================================================
-    # BASIC RESULTS
-    # ========================================================
 
     total = len(
         trades
     )
 
 
-    tp2_wins = int(
+    tp2 = int(
         (
             trades["outcome"]
             == "TP2"
@@ -891,10 +1139,18 @@ def summarize(
     )
 
 
-    sl_losses = int(
+    sl = int(
         (
             trades["outcome"]
             == "SL"
+        ).sum()
+    )
+
+
+    tp1_sl = int(
+        (
+            trades["outcome"]
+            == "TP1_SL"
         ).sum()
     )
 
@@ -916,29 +1172,15 @@ def summarize(
 
 
     tp1_hits = int(
-        trades["tp1_hit"].sum()
+        trades["tp1_hit"]
+        .sum()
     )
 
 
-    tp1_to_sl = int(
-        (
-            (
-                trades["outcome"]
-                == "SL"
-            )
-            &
-            trades["tp1_hit"]
-        ).sum()
+    r_values = (
+        trades["r"]
+        .astype(float)
     )
-
-
-    # ========================================================
-    # R CALCULATIONS
-    # ========================================================
-
-    r_values = trades[
-        "r"
-    ].astype(float)
 
 
     total_r = float(
@@ -946,95 +1188,111 @@ def summarize(
     )
 
 
-    avg_r = float(
+    average_r = float(
         r_values.mean()
     )
 
 
-    gross_profit = float(
+    positive = (
         r_values[
             r_values > 0
-        ].sum()
+        ]
+    )
+
+
+    negative = (
+        r_values[
+            r_values < 0
+        ]
+    )
+
+
+    gross_profit = float(
+        positive.sum()
     )
 
 
     gross_loss = abs(
         float(
-            r_values[
-                r_values < 0
-            ].sum()
+            negative.sum()
         )
     )
 
 
-    profit_factor = (
+    if gross_loss > 0:
 
-        gross_profit
-        / gross_loss
+        profit_factor = (
+            gross_profit
+            / gross_loss
+        )
 
-        if gross_loss > 0
+    else:
 
-        else float("inf")
+        profit_factor = float(
+            "inf"
+        )
+
+
+    winning_trades = int(
+        (
+            r_values > 0
+        ).sum()
     )
 
 
-    # ========================================================
-    # DRAW DOWN
-    # ========================================================
-
-    equity = (
-        r_values.cumsum()
+    losing_trades = int(
+        (
+            r_values < 0
+        ).sum()
     )
 
-
-    peak = (
-        equity.cummax()
-    )
-
-
-    drawdown = (
-        equity - peak
-    )
-
-
-    max_dd = float(
-        drawdown.min()
-    )
-
-
-    # ========================================================
-    # OTHER METRICS
-    # ========================================================
 
     win_rate = (
-        tp2_wins
+        winning_trades
         / total
         * 100
     )
 
 
-    avg_volume = float(
+    expectancy = (
+        average_r
+    )
+
+
+    dd = max_drawdown(
+        trades
+    )
+
+
+    consecutive_losses = (
+        max_consecutive_losses(
+            trades
+        )
+    )
+
+
+    average_volume = float(
         trades[
             "volume_ratio"
         ].mean()
     )
 
 
-    min_volume = float(
+    minimum_volume = float(
         trades[
             "volume_ratio"
         ].min()
     )
 
 
-    max_volume = float(
+    maximum_volume = float(
         trades[
             "volume_ratio"
         ].max()
     )
 
 
-    avg_range = float(
+    average_range = float(
         trades[
             "range_width_pct"
         ].mean()
@@ -1042,65 +1300,49 @@ def summarize(
     )
 
 
-    avg_planned_rr = float(
+    average_planned_reward = float(
         trades[
             "planned_reward_r"
         ].mean()
     )
 
 
-    # ========================================================
-    # OUTPUT
-    # ========================================================
+    print(
+        f"\nTrades:             {total}"
+    )
+
 
     print(
         "\nOUTCOMES"
     )
 
     print(
-        "-" * 68
+        "-" * 72
     )
 
 
     print(
-        f"Trades:              "
-        f"{total}"
+        f"TP2 wins:           {tp2}"
     )
 
-
     print(
-        f"TP2 wins:            "
-        f"{tp2_wins}"
+        f"Full SL:            {sl}"
     )
 
-
     print(
-        f"Stop losses:         "
-        f"{sl_losses}"
+        f"TP1 -> BE:          {tp1_sl}"
     )
 
-
     print(
-        f"Time exits:          "
-        f"{time_exits}"
+        f"Time exits:         {time_exits}"
     )
 
-
     print(
-        f"Open at end:         "
-        f"{open_end}"
+        f"Open at end:        {open_end}"
     )
 
-
     print(
-        f"TP1 hits:            "
-        f"{tp1_hits}"
-    )
-
-
-    print(
-        f"TP1 → SL:            "
-        f"{tp1_to_sl}"
+        f"TP1 hits:           {tp1_hits}"
     )
 
 
@@ -1108,39 +1350,45 @@ def summarize(
         "\nPERFORMANCE"
     )
 
-
     print(
-        "-" * 68
+        "-" * 72
     )
 
 
     print(
-        f"TP2 win rate:        "
-        f"{win_rate:.1f}%"
+        f"Profitable trades:  {winning_trades}"
     )
 
-
     print(
-        f"Total R:             "
-        f"{total_r:+.2f}R"
+        f"Losing trades:      {losing_trades}"
     )
 
-
     print(
-        f"Average R/trade:     "
-        f"{avg_r:+.3f}R"
+        f"Win rate:           {win_rate:.1f}%"
     )
 
-
     print(
-        f"Profit factor:       "
-        f"{profit_factor:.2f}"
+        f"Total R:            {total_r:+.2f}R"
     )
 
+    print(
+        f"Average R/trade:    {average_r:+.3f}R"
+    )
 
     print(
-        f"Max drawdown:        "
-        f"{max_dd:.2f}R"
+        f"Expectancy:         {expectancy:+.3f}R"
+    )
+
+    print(
+        f"Profit factor:      {profit_factor:.2f}"
+    )
+
+    print(
+        f"Max drawdown:       {dd:.2f}R"
+    )
+
+    print(
+        f"Max losing streak:  {consecutive_losses}"
     )
 
 
@@ -1148,51 +1396,29 @@ def summarize(
         "\nSIGNAL QUALITY"
     )
 
-
     print(
-        "-" * 68
+        "-" * 72
     )
 
 
     print(
-        f"Average sweep volume:"
-        f"{avg_volume:>8.2f}x"
+        f"Avg sweep volume:   {average_volume:.2f}x"
     )
-
 
     print(
-        f"Minimum sweep volume:"
-        f"{min_volume:>7.2f}x"
+        f"Min sweep volume:   {minimum_volume:.2f}x"
     )
-
 
     print(
-        f"Maximum sweep volume:"
-        f"{max_volume:>7.2f}x"
+        f"Max sweep volume:   {maximum_volume:.2f}x"
     )
-
 
     print(
-        f"Average range width: "
-        f"{avg_range:.3f}%"
+        f"Avg range width:    {average_range:.3f}%"
     )
-
 
     print(
-        f"Average planned R:   "
-        f"{avg_planned_rr:.2f}R"
-    )
-
-
-    # ========================================================
-    # R CONTRIBUTION
-    # ========================================================
-
-    time_r = float(
-        r_values[
-            trades["outcome"]
-            == "TIME"
-        ].sum()
+        f"Avg planned reward: {average_planned_reward:.2f}R"
     )
 
 
@@ -1200,76 +1426,108 @@ def summarize(
         "\nR CONTRIBUTION"
     )
 
-
     print(
-        "-" * 68
+        "-" * 72
+    )
+
+
+    tp2_r = float(
+        trades.loc[
+            trades["outcome"] == "TP2",
+            "r"
+        ].sum()
+    )
+
+
+    sl_r = float(
+        trades.loc[
+            trades["outcome"].isin(
+                ["SL"]
+            ),
+            "r"
+        ].sum()
+    )
+
+
+    tp1_sl_r = float(
+        trades.loc[
+            trades["outcome"] == "TP1_SL",
+            "r"
+        ].sum()
+    )
+
+
+    time_r = float(
+        trades.loc[
+            trades["outcome"] == "TIME",
+            "r"
+        ].sum()
     )
 
 
     print(
-        f"TP2 R:               "
-        f"{tp2_wins * TARGET_R:+.2f}R"
+        f"TP2 R:              {tp2_r:+.2f}R"
     )
 
 
     print(
-        f"SL R:                "
-        f"{sl_losses * -1.0:+.2f}R"
+        f"Full SL R:          {sl_r:+.2f}R"
     )
 
 
     print(
-        f"TIME R:              "
-        f"{time_r:+.2f}R"
+        f"TP1 -> BE R:        {tp1_sl_r:+.2f}R"
     )
 
 
     print(
-        f"TOTAL R:             "
-        f"{total_r:+.2f}R"
+        f"TIME R:             {time_r:+.2f}R"
     )
 
 
-    # ========================================================
+    print(
+        f"TOTAL R:            {total_r:+.2f}R"
+    )
+
+
+    # --------------------------------------------------------
     # ACCOUNTING CHECK
-    # ========================================================
+    # --------------------------------------------------------
 
-    print(
-        "\nACCOUNTING CHECK"
-    )
-
-
-    print(
-        "-" * 68
-    )
-
-
-    expected_r = (
-
-        tp2_wins
-        * TARGET_R
-
-        - sl_losses
-
+    calculated_r = (
+        tp2_r
+        + sl_r
+        + tp1_sl_r
         + time_r
     )
 
 
     print(
-        f"TP2 + SL + TIME:     "
-        f"{expected_r:+.2f}R"
+        "\nACCOUNTING CHECK"
+    )
+
+    print(
+        "-" * 72
     )
 
 
     print(
-        f"Reported Total R:    "
-        f"{total_r:+.2f}R"
+        f"Components:         {calculated_r:+.2f}R"
     )
 
 
-    if abs(
-        expected_r - total_r
-    ) < 0.0001:
+    print(
+        f"Reported total:     {total_r:+.2f}R"
+    )
+
+
+    difference = (
+        calculated_r
+        - total_r
+    )
+
+
+    if abs(difference) < 0.0001:
 
         print(
             "✓ R accounting is consistent."
@@ -1278,59 +1536,157 @@ def summarize(
     else:
 
         print(
-            "⚠ R accounting mismatch detected."
+            f"⚠ R accounting difference: "
+            f"{difference:+.5f}"
         )
 
 
-    # ========================================================
-    # LAST TRADES
-    # ========================================================
+    monthly_report(
+        trades
+    )
+
+
+# ============================================================
+# ROBUSTNESS TABLE
+# ============================================================
+
+def robustness_summary(
+    df,
+):
 
     print(
-        "\nLAST 15 TRADES"
+        "\n"
+        + "=" * 72
+    )
+
+    print(
+        "PARAMETER ROBUSTNESS TEST"
+    )
+
+    print(
+        "=" * 72
+    )
+
+
+    results = []
+
+
+    for config in TEST_CONFIGS:
+
+        print(
+            f"\nTesting {config['name']}..."
+        )
+
+
+        trades = run_backtest(
+            df,
+            config,
+        )
+
+
+        if trades.empty:
+
+            results.append({
+
+                "config":
+                    config["name"],
+
+                "trades":
+                    0,
+
+                "total_r":
+                    0,
+
+                "avg_r":
+                    0,
+
+                "profit_factor":
+                    0,
+
+                "max_dd":
+                    0,
+
+                "win_rate":
+                    0,
+            })
+
+
+            continue
+
+
+        r = trades["r"].astype(
+            float
+        )
+
+
+        gross_profit = float(
+            r[r > 0].sum()
+        )
+
+
+        gross_loss = abs(
+            float(
+                r[r < 0].sum()
+            )
+        )
+
+
+        pf = (
+            gross_profit
+            / gross_loss
+            if gross_loss > 0
+            else float("inf")
+        )
+
+
+        results.append({
+
+            "config":
+                config["name"],
+
+            "trades":
+                len(trades),
+
+            "total_r":
+                float(r.sum()),
+
+            "avg_r":
+                float(r.mean()),
+
+            "profit_factor":
+                pf,
+
+            "max_dd":
+                max_drawdown(
+                    trades
+                ),
+
+            "win_rate":
+                float(
+                    (
+                        r > 0
+                    ).mean()
+                    * 100
+                ),
+        })
+
+
+    result_df = pd.DataFrame(
+        results
     )
 
 
     print(
-        "-" * 68
-    )
-
-
-    columns = [
-
-        "entry_time",
-        "direction",
-        "entry",
-        "stop",
-        "tp1",
-        "tp2",
-        "volume_ratio",
-        "planned_reward_r",
-        "outcome",
-        "r",
-        "tp1_hit",
-    ]
-
-
-    display = (
-        trades[
-            columns
-        ]
-        .tail(15)
-        .copy()
-    )
-
-
-    print(
-        display.to_string(
-            index=False
+        "\n"
+        + result_df.to_string(
+            index=False,
+            float_format=lambda x:
+                f"{x:.3f}"
         )
     )
 
 
-    print(
-        "=" * 68
-    )
+    return result_df
 
 
 # ============================================================
@@ -1351,7 +1707,7 @@ def main():
 
     parser.add_argument(
         "--output",
-        default="backtest_v2_trades.csv",
+        default="backtest_v3_trades.csv",
     )
 
 
@@ -1371,33 +1727,18 @@ def main():
     )
 
 
-    start_date = (
-        start.strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-
-    end_date = (
-        end.strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-
     print(
-        f"Downloading BTCUSDT 5m data "
+        f"Downloading "
+        f"BTCUSDT 5m data "
         f"for {args.days} days..."
     )
 
 
-    data = fetch_klines(
-
+    df = fetch_klines(
         int(
             start.timestamp()
             * 1000
         ),
-
         int(
             end.timestamp()
             * 1000
@@ -1407,13 +1748,20 @@ def main():
 
     print(
         f"Downloaded "
-        f"{len(data):,} "
-        f"completed candles."
+        f"{len(df):,} completed candles."
     )
 
 
+    # ========================================================
+    # BASE TEST
+    # ========================================================
+
+    base_config = TEST_CONFIGS[0]
+
+
     trades = run_backtest(
-        data
+        df,
+        base_config,
     )
 
 
@@ -1432,11 +1780,29 @@ def main():
 
 
     summarize(
-
         trades,
-        data,
-        start_date,
-        end_date,
+        base_config["name"],
+    )
+
+
+    # ========================================================
+    # ROBUSTNESS
+    # ========================================================
+
+    robustness = robustness_summary(
+        df
+    )
+
+
+    robustness.to_csv(
+        "backtest_v3_robustness.csv",
+        index=False,
+    )
+
+
+    print(
+        "\nSaved robustness results to "
+        "backtest_v3_robustness.csv"
     )
 
 
