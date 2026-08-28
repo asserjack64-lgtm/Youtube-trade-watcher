@@ -1,5 +1,5 @@
 {
-  "active": true,
+  "active": false,
   "last_heartbeat": "2026-08-28T01:47:08.348890+00:00",
   "last_processed_event_id": "2026-08-28 02:15:00+00:00|BEARISH|80147.53",
   "event_id": "2026-08-28 02:15:00+00:00|BEARISH|80147.53",
@@ -14,5 +14,5 @@
   "volume_ratio": 2.0647664677950797,
   "tp1_hit": false,
   "tp2_hit": false,
-  "sl_hit": false
+  "sl_hit": true
 }
