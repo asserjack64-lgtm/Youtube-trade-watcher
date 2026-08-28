@@ -191,7 +191,7 @@ def send_heartbeat(state):
             minutes = (
     (now - previous).total_seconds()
     / 60
-)
+            )
 
             if minutes < HEARTBEAT_MINUTES:
 
