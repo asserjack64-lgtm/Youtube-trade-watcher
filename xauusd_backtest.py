@@ -387,6 +387,21 @@ timestamp = (
 )
 
 
+                base_day = pd.Timestamp(day)
+
+        if base_day.tzinfo is None:
+            base_day = base_day.tz_localize("UTC")
+        else:
+            base_day = base_day.tz_convert("UTC")
+
+        timestamp = (
+            base_day
+            +
+            pd.Timedelta(
+                seconds=int(seconds)
+            )
+        )
+
         rows.append(
             {
                 "time": timestamp,
