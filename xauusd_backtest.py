@@ -2,7 +2,6 @@ import argparse
 import lzma
 import math
 import struct
-import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 
@@ -16,6 +15,7 @@ import requests
 
 SYMBOL = "XAUUSD"
 TIMEFRAME = "M5"
+
 
 # ============================================================
 # V4 PARAMETERS
@@ -117,7 +117,7 @@ def download_day(
 
 
     # --------------------------------------------------------
-    # M5 native candle
+    # Candle files
     # --------------------------------------------------------
 
     if timeframe == "M5":
@@ -133,6 +133,10 @@ def download_day(
             "BID_candles_min_1.bi5"
         ]
 
+
+    # --------------------------------------------------------
+    # Try each file
+    # --------------------------------------------------------
 
     for filename in filenames:
 
@@ -157,9 +161,11 @@ def download_day(
                     timeout=REQUEST_TIMEOUT
                 )
 
+
                 if response.status_code == 404:
 
                     break
+
 
                 if response.status_code != 200:
 
@@ -172,6 +178,7 @@ def download_day(
                         continue
 
                     break
+
 
                 if not response.content:
 
@@ -229,9 +236,9 @@ def parse_bi5_candles(
     day
 ):
     """
-    Dukascopy candle records:
+    Parse Dukascopy BI5 candle data.
 
-    24 bytes each
+    Each candle record is 24 bytes:
 
     uint32 seconds from day start
     uint32 open
@@ -240,6 +247,10 @@ def parse_bi5_candles(
     uint32 high
     float32 volume
     """
+
+    # --------------------------------------------------------
+    # Decompress
+    # --------------------------------------------------------
 
     try:
 
@@ -268,6 +279,7 @@ def parse_bi5_candles(
 
     row_size = 24
 
+
     if len(raw) < row_size:
 
         return pd.DataFrame()
@@ -282,6 +294,38 @@ def parse_bi5_candles(
 
     price_multiplier = 1000.0
 
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Create timezone-aware base day correctly.
+    #
+    # This avoids:
+    #
+    # Cannot pass a datetime or Timestamp
+    # with tzinfo with the tz parameter.
+    # --------------------------------------------------------
+
+    base_day = pd.Timestamp(
+        day
+    )
+
+
+    if base_day.tzinfo is None:
+
+        base_day = base_day.tz_localize(
+            "UTC"
+        )
+
+    else:
+
+        base_day = base_day.tz_convert(
+            "UTC"
+        )
+
+
+    # --------------------------------------------------------
+    # Parse records
+    # --------------------------------------------------------
 
     for offset in range(
         0,
@@ -340,7 +384,7 @@ def parse_bi5_candles(
 
 
         # ----------------------------------------------------
-        # Protect against malformed records
+        # Validate numeric values
         # ----------------------------------------------------
 
         if (
@@ -353,6 +397,10 @@ def parse_bi5_candles(
             continue
 
 
+        # ----------------------------------------------------
+        # Correct malformed high/low
+        # ----------------------------------------------------
+
         if low_price > high_price:
 
             low_price, high_price = (
@@ -360,6 +408,10 @@ def parse_bi5_candles(
                 low_price
             )
 
+
+        # ----------------------------------------------------
+        # Reject invalid prices
+        # ----------------------------------------------------
 
         if (
             open_price <= 0
@@ -371,28 +423,9 @@ def parse_bi5_candles(
             continue
 
 
-        base_day = pd.Timestamp(day)
-
-if base_day.tzinfo is None:
-    base_day = base_day.tz_localize("UTC")
-else:
-    base_day = base_day.tz_convert("UTC")
-
-timestamp = (
-    base_day
-    +
-    pd.Timedelta(
-        seconds=int(seconds)
-    )
-)
-
-
-                base_day = pd.Timestamp(day)
-
-        if base_day.tzinfo is None:
-            base_day = base_day.tz_localize("UTC")
-        else:
-            base_day = base_day.tz_convert("UTC")
+        # ----------------------------------------------------
+        # Build timestamp
+        # ----------------------------------------------------
 
         timestamp = (
             base_day
@@ -401,6 +434,11 @@ timestamp = (
                 seconds=int(seconds)
             )
         )
+
+
+        # ----------------------------------------------------
+        # Store candle
+        # ----------------------------------------------------
 
         rows.append(
             {
@@ -419,10 +457,18 @@ timestamp = (
         )
 
 
+    # --------------------------------------------------------
+    # No valid rows
+    # --------------------------------------------------------
+
     if not rows:
 
         return pd.DataFrame()
 
+
+    # --------------------------------------------------------
+    # Build dataframe
+    # --------------------------------------------------------
 
     df = pd.DataFrame(
         rows
@@ -434,8 +480,12 @@ timestamp = (
         .drop_duplicates(
             subset=["time"]
         )
-        .sort_values("time")
-        .reset_index(drop=True)
+        .sort_values(
+            "time"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
@@ -446,7 +496,9 @@ timestamp = (
 # RESAMPLE M1 -> M5
 # ============================================================
 
-def resample_to_m5(df):
+def resample_to_m5(
+    df
+):
 
     if df.empty:
 
@@ -508,10 +560,13 @@ def download_data(
 
     current = start
 
+
     total_days = (
         end.date()
-        - start.date()
+        -
+        start.date()
     ).days + 1
+
 
     processed = 0
 
@@ -521,6 +576,7 @@ def download_data(
     while current.date() <= end.date():
 
         processed += 1
+
 
         print(
             f"Downloading "
@@ -568,11 +624,16 @@ def download_data(
 
 
     print()
+
     print(
         f"Successful days: "
         f"{successful_days}/{total_days}"
     )
 
+
+    # --------------------------------------------------------
+    # No data
+    # --------------------------------------------------------
 
     if not all_days:
 
@@ -580,6 +641,10 @@ def download_data(
             "No XAUUSD data was downloaded."
         )
 
+
+    # --------------------------------------------------------
+    # Combine
+    # --------------------------------------------------------
 
     df = pd.concat(
         all_days,
@@ -592,8 +657,12 @@ def download_data(
         .drop_duplicates(
             subset=["time"]
         )
-        .sort_values("time")
-        .reset_index(drop=True)
+        .sort_values(
+            "time"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
@@ -613,8 +682,12 @@ def download_data(
         .drop_duplicates(
             subset=["time"]
         )
-        .sort_values("time")
-        .reset_index(drop=True)
+        .sort_values(
+            "time"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
@@ -677,7 +750,9 @@ def volume_ratio(
 # BODY SIZE
 # ============================================================
 
-def body_pct(candle):
+def body_pct(
+    candle
+):
 
     open_price = float(
         candle["open"]
@@ -694,7 +769,10 @@ def body_pct(candle):
 
 
     return (
-        abs(close_price - open_price)
+        abs(
+            close_price -
+            open_price
+        )
         /
         open_price
     )
@@ -719,15 +797,18 @@ def find_signal(
             MIN_VOLUME_RATIO
         )
 
+
     if max_range_width_pct is None:
 
         max_range_width_pct = (
             MAX_RANGE_WIDTH_PCT
         )
 
+
     if sweep_pct is None:
 
         sweep_pct = SWEEP_PCT
+
 
     if confirm_body_min_pct is None:
 
@@ -1069,9 +1150,11 @@ def build_trade(
     )
 
 
-    if direction == "BEARISH":
+    # ========================================================
+    # BEARISH
+    # ========================================================
 
-        # Stop above sweep high.
+    if direction == "BEARISH":
 
         stop = (
             float(
@@ -1105,9 +1188,11 @@ def build_trade(
         )
 
 
-    else:
+    # ========================================================
+    # BULLISH
+    # ========================================================
 
-        # Stop below sweep low.
+    else:
 
         stop = (
             float(
@@ -1142,7 +1227,8 @@ def build_trade(
 
 
     tp2_r = abs(
-        tp2 - entry
+        tp2 -
+        entry
     ) / risk
 
 
@@ -1239,7 +1325,9 @@ def simulate_trade(
         end_index + 1
     ):
 
-        candle = df.iloc[i]
+        candle = df.iloc[
+            i
+        ]
 
         high = float(
             candle["high"]
@@ -1263,8 +1351,8 @@ def simulate_trade(
             if direction == "BULLISH":
 
                 # Conservative:
-                # if both SL and TP1 occur
-                # in same candle, SL wins.
+                # SL wins if both occur
+                # in the same candle.
 
                 if low <= stop:
 
@@ -1314,11 +1402,10 @@ def simulate_trade(
 
         else:
 
-            # After TP1, half position has
-            # been closed at +1R.
+            # Half position closed at +1R.
             #
-            # Remaining half is protected
-            # at breakeven.
+            # Remaining half protected at
+            # breakeven.
 
             breakeven = entry
 
@@ -1439,8 +1526,8 @@ def simulate_trade(
 
     elif outcome == "TP1_BE":
 
-        # Half at TP1 = +0.5R
-        # Remaining half exits at BE.
+        # Half at TP1.
+        # Remaining half at BE.
 
         result_r = (
             TP1_R * 0.5
@@ -1450,10 +1537,6 @@ def simulate_trade(
     else:
 
         # Time exit.
-        #
-        # Calculate actual R based on
-        # the close, with 50/50 position
-        # treatment if TP1 was reached.
 
         if direction == "BULLISH":
 
@@ -1549,6 +1632,7 @@ def run_backtest(
 
     trades = []
 
+
     i = (
         RANGE_CANDLES +
         1
@@ -1614,8 +1698,7 @@ def run_backtest(
 
         # ----------------------------------------------------
         # No overlapping trades.
-        #
-        # Resume searching after the trade closes.
+        # Resume after trade closes.
         # ----------------------------------------------------
 
         exit_time = (
@@ -1655,16 +1738,6 @@ def save_trades(
     filename=TRADES_FILE
 ):
 
-    if trades.empty:
-
-        trades.to_csv(
-            filename,
-            index=False
-        )
-
-        return
-
-
     trades.to_csv(
         filename,
         index=False
@@ -1681,9 +1754,18 @@ def summarize(
 ):
 
     print()
-    print("=" * 68)
-    print(title)
-    print("=" * 68)
+
+    print(
+        "=" * 68
+    )
+
+    print(
+        title
+    )
+
+    print(
+        "=" * 68
+    )
 
 
     if trades.empty:
@@ -1696,7 +1778,9 @@ def summarize(
             "No qualifying setups found."
         )
 
-        print("=" * 68)
+        print(
+            "=" * 68
+        )
 
         return
 
@@ -1709,7 +1793,8 @@ def summarize(
     tp2 = int(
         (
             trades["outcome"]
-            == "TP2"
+            ==
+            "TP2"
         ).sum()
     )
 
@@ -1717,7 +1802,8 @@ def summarize(
     sl = int(
         (
             trades["outcome"]
-            == "SL"
+            ==
+            "SL"
         ).sum()
     )
 
@@ -1725,7 +1811,8 @@ def summarize(
     tp1_be = int(
         (
             trades["outcome"]
-            == "TP1_BE"
+            ==
+            "TP1_BE"
         ).sum()
     )
 
@@ -1733,7 +1820,8 @@ def summarize(
     time_exits = int(
         (
             trades["outcome"]
-            == "TIME"
+            ==
+            "TIME"
         ).sum()
     )
 
@@ -1838,6 +1926,10 @@ def summarize(
     )
 
 
+    # --------------------------------------------------------
+    # Winning streak
+    # --------------------------------------------------------
+
     max_win_streak = 0
 
     current_win_streak = 0
@@ -1858,6 +1950,10 @@ def summarize(
 
             current_win_streak = 0
 
+
+    # --------------------------------------------------------
+    # Print summary
+    # --------------------------------------------------------
 
     print(
         f"Trades:              {total}"
@@ -1919,6 +2015,11 @@ def summarize(
         f"Max winning streak:  {max_win_streak}"
     )
 
+
+    # --------------------------------------------------------
+    # R contribution
+    # --------------------------------------------------------
+
     print()
 
     print(
@@ -1956,7 +2057,8 @@ def summarize(
     time_r = float(
         trades.loc[
             trades["outcome"]
-            == "TIME",
+            ==
+            "TIME",
             "r"
         ].sum()
     )
@@ -1982,6 +2084,10 @@ def summarize(
         f"TOTAL R:             {total_r:+.2f}R"
     )
 
+
+    # --------------------------------------------------------
+    # Signal quality
+    # --------------------------------------------------------
 
     print()
 
@@ -2018,6 +2124,10 @@ def summarize(
     )
 
 
+    # --------------------------------------------------------
+    # Monthly performance
+    # --------------------------------------------------------
+
     print()
 
     print(
@@ -2032,7 +2142,8 @@ def summarize(
     monthly = (
         trades.assign(
             month=pd.to_datetime(
-                trades["entry_time"]
+                trades["entry_time"],
+                utc=True
             ).dt.strftime(
                 "%Y-%m"
             )
@@ -2044,13 +2155,17 @@ def summarize(
             wins=(
                 "r",
                 lambda x:
-                    int((x > 0).sum())
+                    int(
+                        (x > 0).sum()
+                    )
             ),
 
             losses=(
                 "r",
                 lambda x:
-                    int((x < 0).sum())
+                    int(
+                        (x < 0).sum()
+                    )
             ),
 
             R=(
@@ -2073,6 +2188,10 @@ def summarize(
             f"R={row['R']:+.2f}"
         )
 
+
+    # --------------------------------------------------------
+    # Last 15 trades
+    # --------------------------------------------------------
 
     print()
 
@@ -2116,7 +2235,9 @@ def summarize(
     )
 
 
-    print("=" * 68)
+    print(
+        "=" * 68
+    )
 
 
 # ============================================================
@@ -2128,11 +2249,18 @@ def run_robustness(
 ):
 
     print()
-    print("=" * 68)
+
+    print(
+        "=" * 68
+    )
+
     print(
         "PARAMETER ROBUSTNESS TEST"
     )
-    print("=" * 68)
+
+    print(
+        "=" * 68
+    )
 
 
     configurations = [
@@ -2354,6 +2482,7 @@ def run_robustness(
 
 
     print()
+
     print(
         f"{'config':<16}"
         f"{'trades':>8}"
@@ -2392,6 +2521,7 @@ def run_robustness(
 
 
     print()
+
     print(
         f"Saved robustness results to "
         f"{ROBUSTNESS_FILE}"
@@ -2410,6 +2540,7 @@ def data_quality_check(
 ):
 
     print()
+
     print(
         "DATA QUALITY CHECK"
     )
@@ -2542,9 +2673,8 @@ def main():
 
     else:
 
-        # Use yesterday to avoid
-        # requesting the incomplete
-        # current day.
+        # Use yesterday so the current day
+        # is not treated as complete.
 
         end_date = (
             date.today()
@@ -2563,7 +2693,8 @@ def main():
     else:
 
         start_date = (
-            end_date -
+            end_date
+            -
             timedelta(
                 days=args.days - 1
             )
@@ -2590,12 +2721,23 @@ def main():
     )
 
 
+    # ========================================================
+    # HEADER
+    # ========================================================
+
     print()
-    print("=" * 68)
+
+    print(
+        "=" * 68
+    )
+
     print(
         "XAUUSD V4 LIQUIDITY SWEEP BACKTEST"
     )
-    print("=" * 68)
+
+    print(
+        "=" * 68
+    )
 
 
     print(
@@ -2663,7 +2805,9 @@ def main():
     )
 
 
-    print("=" * 68)
+    print(
+        "=" * 68
+    )
 
 
     # ========================================================
@@ -2709,7 +2853,7 @@ def main():
 
 
     # ========================================================
-    # SAVE RAW BACKTEST DATA
+    # SAVE RAW DATA
     # ========================================================
 
     df.to_csv(
@@ -2719,6 +2863,7 @@ def main():
 
 
     print()
+
     print(
         "Saved data to "
         "xauusd_v4_data.csv"
@@ -2726,7 +2871,7 @@ def main():
 
 
     # ========================================================
-    # RUN BASE BACKTEST
+    # BASE BACKTEST
     # ========================================================
 
     print()
@@ -2784,6 +2929,7 @@ def main():
     # ========================================================
 
     print()
+
     print(
         "=" * 68
     )
@@ -2813,7 +2959,8 @@ def main():
         tp2_count = int(
             (
                 trades["outcome"]
-                == "TP2"
+                ==
+                "TP2"
             ).sum()
         )
 
@@ -2821,7 +2968,8 @@ def main():
         sl_count = int(
             (
                 trades["outcome"]
-                == "SL"
+                ==
+                "SL"
             ).sum()
         )
 
@@ -2829,7 +2977,8 @@ def main():
         tp1_be_count = int(
             (
                 trades["outcome"]
-                == "TP1_BE"
+                ==
+                "TP1_BE"
             ).sum()
         )
 
@@ -2837,7 +2986,8 @@ def main():
         time_r = float(
             trades.loc[
                 trades["outcome"]
-                == "TIME",
+                ==
+                "TIME",
                 "r"
             ].sum()
         )
