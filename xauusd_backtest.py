@@ -12,7 +12,7 @@ import requests
 # ============================================================
 
 SYMBOL = "xauusd"
-TIMEFRAME = "m5"
+TIMEFRAME = "5"
 
 # V4 starting parameters.
 # These are deliberately NOT optimized for gold yet.
