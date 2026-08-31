@@ -1404,9 +1404,7 @@ def summarize(
 
                 f"R={x['r'].sum():+8.2f}  "
 
-                f"Win={("
-                x["r"] > 0
-                ).mean() * 100:5.1f}%"
+                f"Win={(x['r'] > 0).mean() * 100:5.1f}%"
             )
 
 
