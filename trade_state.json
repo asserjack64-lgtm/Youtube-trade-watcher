@@ -1,6 +1,6 @@
 {
   "active": true,
-  "last_heartbeat": "2026-09-02T00:13:34.083240+00:00",
+  "last_heartbeat": "2026-09-02T01:17:13.489688+00:00",
   "last_processed_event_id": "2026-09-01 23:45:00+00:00|2026-09-01 23:50:00+00:00|BEARISH|77591.82|77030.00",
   "event_id": "2026-09-01 23:45:00+00:00|2026-09-01 23:50:00+00:00|BEARISH|77591.82|77030.00",
   "direction": "BEARISH",
@@ -21,5 +21,5 @@
   "tp2_hit": false,
   "sl_hit": false,
   "breakeven": true,
-  "bars_in_trade": 20
+  "bars_in_trade": 21
 }
