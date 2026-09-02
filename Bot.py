@@ -1,5 +1,4 @@
 import os
-import sys
 import json
 import requests
 import pandas as pd
@@ -7,161 +6,202 @@ import matplotlib.pyplot as plt
 
 
 # ============================================================
-# V4 BTC RANGE LIQUIDITY STRATEGY
+# V4 PAPER-TRADE BOT
+# ============================================================
+# V4 is the exact bearish-only range-liquidity model that was
+# validated out-of-sample in backtest_v4.
+#
+# IMPORTANT:
+# - PAPER TRADING ONLY
+# - No exchange orders are placed.
+# - State is persisted so GitHub Actions runs can be stateless.
+# - processed_event_ids prevents the same closed signal from
+#   being alerted again every 5 minutes.
 # ============================================================
 
-SYMBOL = "BTCUSDT"
+
+SYMBOL = "XAUUSD"
+# Spot XAUUSD has no centralized exchange volume. The default feed below
+# uses COMEX gold futures as a liquid, no-key proxy for Gold with real volume.
+DATA_SYMBOL = "GC=F"
+DATA_PROVIDER = "YAHOO_GOLD_FUTURES"
 INTERVAL = "5m"
-CANDLES = 300
+CANDLES = 200
 
+# ---------------- V4 STRATEGY ----------------
 
-# ============================================================
-# V4 STRATEGY PARAMETERS
-# ============================================================
-
-RANGE_CANDLES = 24
-
-MAX_RANGE_WIDTH_PCT = 0.015
-
-SWEEP_PCT = 0.0003
-
-SL_BUFFER_PCT = 0.0005
+RANGE_CANDLES = 24              # previous 2 hours
+MAX_RANGE_WIDTH_PCT = 0.015     # <= 1.5%
+SWEEP_PCT = 0.0003              # 0.03% above range high
+SL_BUFFER_PCT = 0.0005          # 0.05% above sweep high
 
 VOLUME_LOOKBACK = 20
+MIN_VOLUME_RATIO = 1.50         # V4
+CONFIRM_BODY_MIN_PCT = 0.0008   # V4 = 0.08%
 
-MIN_VOLUME_RATIO = 1.50
-
-CONFIRM_BODY_MIN_PCT = 0.0008
-
-
-# ============================================================
-# TRADE MANAGEMENT
-# ============================================================
+MAX_BARS_IN_TRADE = 72          # 6 hours
 
 TP1_R = 1.0
 TP2_R = 2.0
-
 TP1_PARTIAL = 0.50
-
 MOVE_SL_TO_BREAKEVEN = True
 
-MAX_BARS_IN_TRADE = 72
+MIN_PLANNED_REWARD_R = 1.50
 
 
-# ============================================================
-# HEARTBEAT
-# ============================================================
+# ---------------- BOT STATE ----------------
+
+STATE_FILE = "xauusd_trade_state.json"
+HISTORY_FILE = "xauusd_trade_history.json"
+CHART_FILE = "xauusd_v4_liquidity_setup.png"
 
 HEARTBEAT_MINUTES = 60
+MAX_PROCESSED_EVENTS = 200
 
-
-# ============================================================
-# FILES
-# ============================================================
-
-STATE_FILE = "trade_state.json"
-
-HISTORY_FILE = "trade_history.json"
-
-CHART_FILE = "btc_v4_setup.png"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-BOT_TOKEN = os.environ.get(
-    "TELEGRAM_BOT_TOKEN"
-)
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-CHAT_ID = os.environ.get(
-    "TELEGRAM_CHAT_ID"
-)
-
-
-# ============================================================
-# TELEGRAM MESSAGE
-# ============================================================
 
 def telegram(message):
-
     if not BOT_TOKEN:
-
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN is missing"
-        )
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
     if not CHAT_ID:
+        raise RuntimeError("TELEGRAM_CHAT_ID is missing")
 
-        raise RuntimeError(
-            "TELEGRAM_CHAT_ID is missing"
-        )
-
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{BOT_TOKEN}/sendMessage"
-    )
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     response = requests.post(
         url,
         data={
             "chat_id": CHAT_ID,
-            "text": message
+            "text": message,
         },
-        timeout=20
+        timeout=20,
     )
 
     response.raise_for_status()
 
-    return response.json()
 
-
-# ============================================================
-# TELEGRAM CHART
-# ============================================================
-
-def send_chart(
-    chart_file,
-    caption
-):
-
+def send_chart(path, caption):
     if not BOT_TOKEN:
-
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN is missing"
-        )
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
     if not CHAT_ID:
+        raise RuntimeError("TELEGRAM_CHAT_ID is missing")
 
-        raise RuntimeError(
-            "TELEGRAM_CHAT_ID is missing"
-        )
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
 
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{BOT_TOKEN}/sendPhoto"
-    )
-
-    with open(
-        chart_file,
-        "rb"
-    ) as photo:
-
+    with open(path, "rb") as photo:
         response = requests.post(
             url,
             data={
                 "chat_id": CHAT_ID,
-                "caption": caption
+                "caption": caption,
             },
-            files={
-                "photo": photo
-            },
-            timeout=30
+            files={"photo": photo},
+            timeout=30,
         )
 
     response.raise_for_status()
 
-    return response.json()
+
+# ============================================================
+# STATE
+# ============================================================
+
+def default_state():
+    return {
+        "active": False,
+
+        "event_id": "",
+        "last_signal_event_id": "",
+        "processed_event_ids": [],
+
+        "last_heartbeat": "",
+
+        "direction": "",
+
+        "entry": 0.0,
+        "stop_loss": 0.0,
+        "tp1": 0.0,
+        "tp2": 0.0,
+        "level": 0.0,
+
+        "range_high": 0.0,
+        "range_low": 0.0,
+
+        "sweep_time": "",
+        "entry_time": "",
+        "confirmation_time": "",
+
+        "volume_ratio": 0.0,
+        "range_width_pct": 0.0,
+        "planned_reward_r": 0.0,
+
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "sl_hit": False,
+        "breakeven": False,
+
+        "partial_realized_r": 0.0,
+    }
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        if not isinstance(state, dict):
+            return default_state()
+
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default_state()
+
+    defaults = default_state()
+
+    for key, value in defaults.items():
+        if key not in state:
+            state[key] = value
+
+    if not isinstance(state.get("processed_event_ids"), list):
+        state["processed_event_ids"] = []
+
+    state["processed_event_ids"] = state["processed_event_ids"][
+        -MAX_PROCESSED_EVENTS:
+    ]
+
+    return state
+
+
+def save_state(state):
+    tmp = STATE_FILE + ".tmp"
+
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+    os.replace(tmp, STATE_FILE)
+
+
+def mark_event_processed(state, event_id):
+    events = state.setdefault("processed_event_ids", [])
+
+    if event_id not in events:
+        events.append(event_id)
+
+    state["processed_event_ids"] = events[-MAX_PROCESSED_EVENTS:]
+
+
+def event_already_processed(state, event_id):
+    return event_id in state.get("processed_event_ids", [])
 
 
 # ============================================================
@@ -169,1660 +209,519 @@ def send_chart(
 # ============================================================
 
 def send_heartbeat(state):
+    now = pd.Timestamp.now(tz="UTC")
 
-    now = pd.Timestamp.now(
-        tz="UTC"
-    )
+    previous_text = state.get("last_heartbeat", "")
 
-    last = state.get(
-        "last_heartbeat",
-        ""
-    )
-
-    if last:
-
+    if previous_text:
         try:
-
-            previous = pd.to_datetime(
-                last,
-                utc=True
-            )
+            previous = pd.to_datetime(previous_text, utc=True)
 
             minutes = (
-    (now - previous).total_seconds()
-    / 60
-            )
+                now - previous
+            ).total_seconds() / 60
 
             if minutes < HEARTBEAT_MINUTES:
-
                 return False
 
         except Exception:
-
             pass
 
-
-    message = f"""
-🟢 BTC V4 MONITOR
+    telegram(
+        f"""🟢 GOLD / XAUUSD V4 LIQUIDITY MONITOR
 
 Bot status: ACTIVE
 
-Market:
-BTCUSDT
+Market: {SYMBOL} (data: {DATA_SYMBOL})
+Timeframe: {INTERVAL}
 
-Timeframe:
-5m
-
-Strategy:
-V4 Range Liquidity Sweep
-
-Current check:
+Last check:
 {now.strftime("%Y-%m-%d %H:%M UTC")}
 
+Strategy:
+V4 Bearish Range Liquidity Sweep
+
 Monitoring:
+💧 Range liquidity sweeps
+📊 Volume >= {MIN_VOLUME_RATIO:.2f}x
+📉 Strong bearish confirmation
+🎯 TP1 / TP2
+🛑 Stop Loss
+🔒 Duplicate-signal protection
 
-📦 2-hour range
-💧 Liquidity sweep
-📊 Volume confirmation
-📈 Displacement confirmation
-🎯 Paper trade setups
-
-⚠️ No real trades are being placed.
+⚠️ PAPER TRADING ONLY
 """
+    )
 
-    telegram(message)
-
-    state[
-        "last_heartbeat"
-    ] = now.isoformat()
+    state["last_heartbeat"] = now.isoformat()
 
     return True
 
 
 # ============================================================
-# BINANCE DATA
+# GOLD DATA
 # ============================================================
 
 def get_data():
+    """
+    Download completed 5-minute Gold futures candles from Yahoo Finance.
 
-    url = (
-        "https://data-api.binance.vision/"
-        "api/v3/klines"
-    )
-
+    GC=F is COMEX Gold futures. It is used as the no-key market-data
+    proxy because spot XAUUSD has no centralized exchange volume. The V4
+    strategy needs a meaningful volume series for its liquidity-sweep filter.
+    No exchange orders are placed.
+    """
     params = {
-
-        "symbol":
-            SYMBOL,
-
-        "interval":
-            INTERVAL,
-
-        "limit":
-            CANDLES
+        "interval": "5m",
+        "range": "5d",
+        "includePrePost": "true",
+        "events": "div,splits",
     }
 
-
     response = requests.get(
-        url,
+        YAHOO_CHART_URL,
         params=params,
-        timeout=20
+        timeout=20,
+        headers={"User-Agent": "Mozilla/5.0"},
     )
-
     response.raise_for_status()
+    payload = response.json()
 
-    data = response.json()
+    result = payload.get("chart", {}).get("result")
+    if not result:
+        error = payload.get("chart", {}).get("error")
+        raise RuntimeError(f"Yahoo Gold data error: {error}")
 
+    result = result[0]
+    timestamps = result.get("timestamp", [])
+    quote = result.get("indicators", {}).get("quote", [{}])[0]
 
-    columns = [
+    if not timestamps:
+        raise RuntimeError("Yahoo returned no Gold candles.")
 
-        "time",
+    df = pd.DataFrame({
+        "time": pd.to_datetime(timestamps, unit="s", utc=True),
+        "open": quote.get("open", []),
+        "high": quote.get("high", []),
+        "low": quote.get("low", []),
+        "close": quote.get("close", []),
+        "volume": quote.get("volume", []),
+    })
 
-        "open",
+    for column in ["open", "high", "low", "close", "volume"]:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
 
-        "high",
+    df = df.dropna(subset=["open", "high", "low", "close"]).copy()
+    df["volume"] = df["volume"].fillna(0.0)
 
-        "low",
-
-        "close",
-
-        "volume",
-
-        "close_time",
-
-        "quote_volume",
-
-        "trades",
-
-        "taker_buy_volume",
-
-        "taker_buy_quote_volume",
-
-        "unused"
-    ]
-
-
-    df = pd.DataFrame(
-        data,
-        columns=columns
-    )
-
-
-    numeric = [
-
-        "open",
-
-        "high",
-
-        "low",
-
-        "close",
-
-        "volume"
-    ]
-
-
-    for column in numeric:
-
-        df[column] = pd.to_numeric(
-            df[column],
-            errors="coerce"
-        )
-
-
-    df["time"] = pd.to_datetime(
-        df["time"],
-        unit="ms",
-        utc=True
-    )
-
-
-    df["close_time"] = pd.to_datetime(
-        df["close_time"],
-        unit="ms",
-        utc=True
-    )
-
-
-    # Remove forming candle.
-
-    now = pd.Timestamp.now(
-        tz="UTC"
-    )
-
-    df = df[
-        df["close_time"] <= now
-    ]
-
-
+    # Yahoo's 5m feed can contain duplicate timestamps.
     df = (
-        df
-        .drop_duplicates(
-            "time"
-        )
-        .sort_values(
-            "time"
-        )
-        .reset_index(
-            drop=True
-        )
+        df.drop_duplicates("time")
+        .sort_values("time")
+        .reset_index(drop=True)
     )
 
+    # Treat only fully completed 5-minute candles as signal data.
+    now = pd.Timestamp.now(tz="UTC")
+    df["close_time"] = df["time"] + pd.Timedelta(minutes=5)
+    df = df[df["close_time"] <= now].reset_index(drop=True)
+
+    if len(df) < RANGE_CANDLES + VOLUME_LOOKBACK + 2:
+        raise RuntimeError(
+            f"Not enough completed Gold candles: {len(df)}"
+        )
+
+    if float(df["volume"].max()) <= 0:
+        raise RuntimeError(
+            "Gold feed returned no usable volume. V4 volume filter cannot be validated."
+        )
 
     return df
 
 
 # ============================================================
-# VOLUME RATIO
+# V4 SIGNAL
 # ============================================================
 
-def volume_ratio(
-    df,
-    index
-):
+def volume_ratio(df, index):
+    start = max(0, index - VOLUME_LOOKBACK)
 
-    start = max(
-        0,
-        index - VOLUME_LOOKBACK
-    )
-
-    previous = df.iloc[
-        start:index
-    ]["volume"]
-
+    previous = df.iloc[start:index]["volume"]
 
     if len(previous) < 5:
-
         return 0.0
-
 
     average = previous.mean()
 
-
     if average <= 0:
-
         return 0.0
 
-
     return float(
-        df.iloc[index]["volume"]
-        / average
+        df.iloc[index]["volume"] / average
     )
 
 
-# ============================================================
-# V4 RANGE SIGNAL
-# ============================================================
+def find_v4_signal(df):
+    """
+    V4 exact model:
 
-def find_signal(
-    df,
-    confirmation_index
-):
+    1. Previous 24 completed candles define the range.
+    2. Range width <= 1.5%.
+    3. Sweep candle trades above range high by >= 0.03%.
+    4. Sweep closes back below range high.
+    5. Sweep volume >= 1.50x prior 20-candle average.
+    6. Immediately following candle confirms:
+       - closes below range high
+       - bearish candle
+       - body >= 0.08%
+       - closes below midpoint of sweep high/sweep close
+    7. Entry = confirmation close.
+    8. SL = sweep high + 0.05%.
+    9. TP1 = 1R.
+    10. Opposite range low must provide >= 1.5R.
+    11. TP2 = the closer of theoretical 2R and opposite range
+        target, while still >= 1.5R.
+    """
 
-    # confirmation_index is the candle
-    # immediately after the sweep.
-
-    sweep_index = (
-        confirmation_index - 1
-    )
-
-
-    minimum = (
-        RANGE_CANDLES
-        + VOLUME_LOOKBACK
-        + 2
-    )
-
-
-    if sweep_index < minimum:
-
+    # Need enough candles:
+    # range + volume lookback + sweep + confirmation.
+    if len(df) < RANGE_CANDLES + VOLUME_LOOKBACK + 2:
         return None
 
+    # Last completed candle = confirmation.
+    confirmation_i = len(df) - 1
+    sweep_i = confirmation_i - 1
 
-    # ========================================================
-    # RANGE
-    # ========================================================
+    if sweep_i < RANGE_CANDLES + VOLUME_LOOKBACK:
+        return None
 
     range_df = df.iloc[
-        sweep_index - RANGE_CANDLES:
-        sweep_index
+        sweep_i - RANGE_CANDLES:sweep_i
     ]
 
-
-    range_high = float(
-        range_df["high"].max()
-    )
-
-
-    range_low = float(
-        range_df["low"].min()
-    )
-
+    range_high = float(range_df["high"].max())
+    range_low = float(range_df["low"].min())
 
     midpoint = (
-        range_high
-        + range_low
+        range_high + range_low
     ) / 2
 
-
     if midpoint <= 0:
-
         return None
-
 
     range_width_pct = (
-        range_high
-        - range_low
+        range_high - range_low
     ) / midpoint
 
-
-    if (
-        range_width_pct
-        > MAX_RANGE_WIDTH_PCT
-    ):
-
+    if range_width_pct > MAX_RANGE_WIDTH_PCT:
         return None
 
+    sweep = df.iloc[sweep_i]
+    confirm = df.iloc[confirmation_i]
 
-    sweep = df.iloc[
-        sweep_index
-    ]
+    sweep_high = float(sweep["high"])
+    sweep_close = float(sweep["close"])
 
-
-    confirm = df.iloc[
-        confirmation_index
-    ]
-
-
-    sweep_high = float(
-        sweep["high"]
+    # V4 bearish sweep.
+    bearish_sweep = (
+        sweep_high
+        > range_high * (1 + SWEEP_PCT)
+        and sweep_close < range_high
     )
 
+    if not bearish_sweep:
+        return None
 
-    sweep_low = float(
-        sweep["low"]
-    )
-
-
-    sweep_close = float(
-        sweep["close"]
-    )
-
-
-    confirm_open = float(
-        confirm["open"]
-    )
-
-
-    confirm_high = float(
-        confirm["high"]
-    )
-
-
-    confirm_low = float(
-        confirm["low"]
-    )
-
-
-    confirm_close = float(
-        confirm["close"]
-    )
-
-
-    # ========================================================
-    # VOLUME
-    # ========================================================
-
-    vr = volume_ratio(
-        df,
-        sweep_index
-    )
-
+    vr = volume_ratio(df, sweep_i)
 
     if vr < MIN_VOLUME_RATIO:
-
         return None
 
+    confirm_open = float(confirm["open"])
+    confirm_close = float(confirm["close"])
 
-    # ========================================================
-    # BEARISH SWEEP
-    # ========================================================
-
-    bearish_sweep = (
-
-        sweep_high
-        >
-        range_high
-        * (
-            1 + SWEEP_PCT
-        )
-
-        and
-
-        sweep_close
-        <
-        range_high
-    )
-
-
-    bearish_body_pct = (
-
-        confirm_open
-        - confirm_close
+    body_pct = (
+        confirm_open - confirm_close
     ) / confirm_open
-
 
     bearish_confirmation = (
-
-        confirm_close
-        <
-        range_high
-
-        and
-
-        confirm_close
-        <
-        confirm_open
-
-        and
-
-        bearish_body_pct
-        >= CONFIRM_BODY_MIN_PCT
-
-        and
-
-        confirm_close
-        <
-        (
-            sweep_high
-            + sweep_close
-        ) / 2
+        confirm_close < range_high
+        and confirm_close < confirm_open
+        and body_pct >= CONFIRM_BODY_MIN_PCT
+        and confirm_close
+        < (sweep_high + sweep_close) / 2
     )
 
-
-    if (
-        bearish_sweep
-        and
-        bearish_confirmation
-    ):
-
-        entry = confirm_close
-
-
-        # Stop beyond actual sweep extreme.
-
-        stop = (
-            sweep_high
-            * (
-                1 + SL_BUFFER_PCT
-            )
-        )
-
-
-        risk = (
-            stop
-            - entry
-        )
-
-
-        if risk <= 0:
-
-            return None
-
-
-        tp1 = (
-            entry
-            - risk * TP1_R
-        )
-
-
-        theoretical_tp2 = (
-            entry
-            - risk * TP2_R
-        )
-
-
-        # Opposite side of range.
-
-        opposite_range = (
-            range_low
-        )
-
-
-        # We cannot demand more than the
-        # available range.
-
-        tp2 = max(
-            theoretical_tp2,
-            opposite_range
-        )
-
-
-        reward_r = (
-            entry
-            - tp2
-        ) / risk
-
-
-        # Require at least 1.5R.
-
-        if reward_r < 1.5:
-
-            return None
-
-
-        return {
-
-            "direction":
-                "BEARISH",
-
-            "signal_time":
-                confirm["time"],
-
-            "sweep_time":
-                sweep["time"],
-
-            "range_high":
-                range_high,
-
-            "range_low":
-                range_low,
-
-            "entry":
-                entry,
-
-            "stop":
-                stop,
-
-            "tp1":
-                tp1,
-
-            "tp2":
-                tp2,
-
-            "volume_ratio":
-                vr,
-
-            "range_width_pct":
-                range_width_pct,
-
-            "reward_r":
-                reward_r
-        }
-
-
-    # ========================================================
-    # BULLISH SWEEP
-    # ========================================================
-
-    bullish_sweep = (
-
-        sweep_low
-        <
-        range_low
-        * (
-            1 - SWEEP_PCT
-        )
-
-        and
-
-        sweep_close
-        >
-        range_low
-    )
-
-
-    bullish_body_pct = (
-
-        confirm_close
-        - confirm_open
-    ) / confirm_open
-
-
-    bullish_confirmation = (
-
-        confirm_close
-        >
-        range_low
-
-        and
-
-        confirm_close
-        >
-        confirm_open
-
-        and
-
-        bullish_body_pct
-        >= CONFIRM_BODY_MIN_PCT
-
-        and
-
-        confirm_close
-        >
-        (
-            sweep_low
-            + sweep_close
-        ) / 2
-    )
-
-
-    if (
-        bullish_sweep
-        and
-        bullish_confirmation
-    ):
-
-        entry = confirm_close
-
-
-        stop = (
-            sweep_low
-            * (
-                1 - SL_BUFFER_PCT
-            )
-        )
-
-
-        risk = (
-            entry
-            - stop
-        )
-
-
-        if risk <= 0:
-
-            return None
-
-
-        tp1 = (
-            entry
-            + risk * TP1_R
-        )
-
-
-        theoretical_tp2 = (
-            entry
-            + risk * TP2_R
-        )
-
-
-        opposite_range = (
-            range_high
-        )
-
-
-        tp2 = min(
-            theoretical_tp2,
-            opposite_range
-        )
-
-
-        reward_r = (
-            tp2
-            - entry
-        ) / risk
-
-
-        if reward_r < 1.5:
-
-            return None
-
-
-        return {
-
-            "direction":
-                "BULLISH",
-
-            "signal_time":
-                confirm["time"],
-
-            "sweep_time":
-                sweep["time"],
-
-            "range_high":
-                range_high,
-
-            "range_low":
-                range_low,
-
-            "entry":
-                entry,
-
-            "stop":
-                stop,
-
-            "tp1":
-                tp1,
-
-            "tp2":
-                tp2,
-
-            "volume_ratio":
-                vr,
-
-            "range_width_pct":
-                range_width_pct,
-
-            "reward_r":
-                reward_r
-        }
-
-
-    return None
-
-
-# ============================================================
-# ANALYZE CURRENT MARKET
-# ============================================================
-
-def analyze(df):
-
-    # --------------------------------------------------------
-    # Latest completed candle
-    # --------------------------------------------------------
-
-    if len(df) < (
-        RANGE_CANDLES
-        + VOLUME_LOOKBACK
-        + 3
-    ):
-
+    if not bearish_confirmation:
         return None
 
+    entry = confirm_close
 
-    # Last candle is completed because get_data()
-    # removed the currently-forming candle.
-
-    confirmation_index = (
-        len(df) - 1
+    stop = sweep_high * (
+        1 + SL_BUFFER_PCT
     )
 
+    risk = stop - entry
 
-    signal = find_signal(
-        df,
-        confirmation_index
+    if risk <= 0:
+        return None
+
+    tp1 = entry - (
+        risk * TP1_R
     )
 
+    theoretical_tp2 = entry - (
+        risk * TP2_R
+    )
 
-    return signal
+    opposite_range = range_low
 
+    range_reward_r = (
+        entry - opposite_range
+    ) / risk
 
-# ============================================================
-# DEFAULT STATE
-# ============================================================
+    if range_reward_r < MIN_PLANNED_REWARD_R:
+        return None
 
-def default_state():
+    # Exact V4 logic.
+    tp2 = max(
+        theoretical_tp2,
+        opposite_range,
+    )
+
+    planned_reward_r = (
+        entry - tp2
+    ) / risk
+
+    if planned_reward_r < MIN_PLANNED_REWARD_R:
+        return None
+
+    event_id = (
+        f"{confirm['time'].isoformat()}|"
+        f"BEARISH|"
+        f"{range_high:.2f}|"
+        f"{sweep_high:.2f}"
+    )
 
     return {
+        "event_id": event_id,
+        "direction": "BEARISH",
 
-        "active":
-            False,
+        "signal_time": confirm["time"],
+        "sweep_time": sweep["time"],
 
-        "last_heartbeat":
-            "",
+        "range_high": range_high,
+        "range_low": range_low,
 
-        "last_processed_event_id":
-            "",
+        "entry": entry,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
 
-        "event_id":
-            "",
-
-        "direction":
-            "",
-
-        "entry":
-            0,
-
-        "stop_loss":
-            0,
-
-        "original_stop_loss":
-            0,
-
-        "tp1":
-            0,
-
-        "tp2":
-            0,
-
-        "level":
-            0,
-
-        "range_high":
-            0,
-
-        "range_low":
-            0,
-
-        "sweep_time":
-            "",
-
-        "confirmation_time":
-            "",
-
-        "volume_ratio":
-            0,
-
-        "range_width_pct":
-            0,
-
-        "reward_r":
-            0,
-
-        "tp1_hit":
-            False,
-
-        "tp2_hit":
-            False,
-
-        "sl_hit":
-            False,
-
-        "breakeven":
-            False,
-
-        "bars_in_trade":
-            0
+        "volume_ratio": vr,
+        "range_width_pct": range_width_pct,
+        "planned_reward_r": planned_reward_r,
     }
 
 
 # ============================================================
-# LOAD STATE
-# ============================================================
-
-def load_state():
-
-    try:
-
-        with open(
-            STATE_FILE,
-            "r"
-        ) as f:
-
-            state = json.load(f)
-
-
-        if not isinstance(
-            state,
-            dict
-        ):
-
-            return default_state()
-
-
-        defaults = default_state()
-
-
-        for key, value in (
-            defaults.items()
-        ):
-
-            if key not in state:
-
-                state[key] = value
-
-
-        return state
-
-
-    except (
-        FileNotFoundError,
-        json.JSONDecodeError
-    ):
-
-        return default_state()
-
-
-# ============================================================
-# SAVE STATE
-# ============================================================
-
-def save_state(state):
-
-    with open(
-        STATE_FILE,
-        "w"
-    ) as f:
-
-        json.dump(
-            state,
-            f,
-            indent=2
-        )
-
-
-# ============================================================
-# LOAD HISTORY
+# HISTORY
 # ============================================================
 
 def load_history():
-
     try:
-
-        with open(
-            HISTORY_FILE,
-            "r"
-        ) as f:
-
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             history = json.load(f)
 
+        return history if isinstance(history, list) else []
 
-        if isinstance(
-            history,
-            list
-        ):
-
-            return history
-
-
+    except (FileNotFoundError, json.JSONDecodeError):
         return []
 
-
-    except (
-        FileNotFoundError,
-        json.JSONDecodeError
-    ):
-
-        return []
-
-
-# ============================================================
-# SAVE HISTORY
-# ============================================================
 
 def save_history(history):
+    tmp = HISTORY_FILE + ".tmp"
 
-    with open(
-        HISTORY_FILE,
-        "w"
-    ) as f:
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
 
-        json.dump(
-            history,
-            f,
-            indent=2
-        )
+    os.replace(tmp, HISTORY_FILE)
 
 
-# ============================================================
-# DUPLICATE PROTECTION
-# ============================================================
-
-def event_already_processed(
-    event_id,
-    state
-):
-
-    if (
-        state.get(
-            "last_processed_event_id",
-            ""
-        )
-        == event_id
-    ):
-
-        return True
-
-
-    if (
-        state.get(
-            "event_id",
-            ""
-        )
-        == event_id
-    ):
-
-        return True
-
-
+def record_completed_trade(state, outcome, result_r):
     history = load_history()
 
-
-    for trade in history:
-
-        if (
-            trade.get(
-                "event_id",
-                ""
-            )
-            == event_id
-        ):
-
-            return True
-
-
-    return False
-
-
-# ============================================================
-# RECORD COMPLETED TRADE
-# ============================================================
-
-def record_completed_trade(
-    state,
-    outcome,
-    exit_price=None
-):
-
-    history = load_history()
-
-
-    # --------------------------------------------------------
-    # Prevent duplicate history record
-    # --------------------------------------------------------
-
-    event_id = state.get(
-        "event_id",
-        ""
-    )
-
+    event_id = state.get("event_id", "")
 
     for existing in history:
-
-        if (
-            existing.get(
-                "event_id",
-                ""
-            )
-            == event_id
-        ):
-
+        if existing.get("event_id") == event_id:
             return
 
-
-    entry = float(
-        state.get(
-            "entry",
-            0
-        )
-    )
-
-
-    stop = float(
-        state.get(
-            "original_stop_loss",
-            state.get(
-                "stop_loss",
-                0
-            )
-        )
-    )
-
-
-    tp1 = float(
-        state.get(
-            "tp1",
-            0
-        )
-    )
-
-
-    tp2 = float(
-        state.get(
-            "tp2",
-            0
-        )
-    )
-
-
-    direction = state.get(
-        "direction",
-        ""
-    )
-
-
-    # --------------------------------------------------------
-    # Calculate realized R
-    # --------------------------------------------------------
-
-    if outcome == "SL":
-
-        result_r = -1.0
-
-
-    elif outcome == "TP1_BE":
-
-        # 50% made +1R.
-        # Remaining 50% exited at breakeven.
-
-        result_r = (
-            TP1_PARTIAL
-            * TP1_R
-        )
-
-
-    elif outcome == "TP2":
-
-        # 50% at TP1 = +0.5R
-        # 50% at TP2 = +1.0R
-        #
-        # Total = +1.5R
-
-        result_r = (
-            TP1_PARTIAL
-            * TP1_R
-            +
-            (
-                1
-                - TP1_PARTIAL
-            )
-            * TP2_R
-        )
-
-
-    elif outcome == "TIME":
-
-        if exit_price is None:
-
-            result_r = 0.0
-
-        else:
-
-            if direction == "BULLISH":
-
-                risk = (
-                    entry
-                    - stop
-                )
-
-                if risk > 0:
-
-                    raw_r = (
-                        exit_price
-                        - entry
-                    ) / risk
-
-                else:
-
-                    raw_r = 0.0
-
-            else:
-
-                risk = (
-                    stop
-                    - entry
-                )
-
-                if risk > 0:
-
-                    raw_r = (
-                        entry
-                        - exit_price
-                    ) / risk
-
-                else:
-
-                    raw_r = 0.0
-
-
-            if state.get(
-                "tp1_hit",
-                False
-            ):
-
-                remaining_fraction = (
-                    1
-                    - TP1_PARTIAL
-                )
-
-
-                if direction == "BULLISH":
-
-                    remaining_r = (
-                        remaining_fraction
-                        * raw_r
-                    )
-
-                else:
-
-                    remaining_r = (
-                        remaining_fraction
-                        * raw_r
-                    )
-
-
-                result_r = (
-                    TP1_PARTIAL
-                    * TP1_R
-                    +
-                    remaining_r
-                )
-
-            else:
-
-                result_r = raw_r
-
-
-    else:
-
-        result_r = 0.0
-
-
     trade = {
+        "event_id": event_id,
+        "symbol": SYMBOL,
+        "direction": state.get("direction", ""),
 
-        "event_id":
-            event_id,
+        "entry": float(state.get("entry", 0)),
+        "stop_loss": float(state.get("stop_loss", 0)),
+        "tp1": float(state.get("tp1", 0)),
+        "tp2": float(state.get("tp2", 0)),
 
-        "symbol":
-            SYMBOL,
+        "range_high": float(state.get("range_high", 0)),
+        "range_low": float(state.get("range_low", 0)),
 
-        "strategy":
-            "V4_RANGE_LIQUIDITY",
+        "sweep_time": state.get("sweep_time", ""),
+        "entry_time": state.get("entry_time", ""),
+        "confirmation_time": state.get(
+            "confirmation_time", ""
+        ),
 
-        "direction":
-            direction,
+        "volume_ratio": float(
+            state.get("volume_ratio", 0)
+        ),
 
-        "entry":
-            entry,
+        "range_width_pct": float(
+            state.get("range_width_pct", 0)
+        ),
 
-        "stop_loss":
-            stop,
+        "planned_reward_r": float(
+            state.get("planned_reward_r", 0)
+        ),
 
-        "tp1":
-            tp1,
+        "tp1_hit": bool(
+            state.get("tp1_hit", False)
+        ),
 
-        "tp2":
-            tp2,
+        "tp2_hit": bool(
+            state.get("tp2_hit", False)
+        ),
 
-        "level":
-            float(
-                state.get(
-                    "level",
-                    0
-                )
-            ),
+        "sl_hit": bool(
+            state.get("sl_hit", False)
+        ),
 
-        "range_high":
-            float(
-                state.get(
-                    "range_high",
-                    0
-                )
-            ),
+        "breakeven": bool(
+            state.get("breakeven", False)
+        ),
 
-        "range_low":
-            float(
-                state.get(
-                    "range_low",
-                    0
-                )
-            ),
+        "partial_realized_r": float(
+            state.get("partial_realized_r", 0)
+        ),
 
-        "sweep_time":
-            state.get(
-                "sweep_time",
-                ""
-            ),
+        "outcome": outcome,
+        "result_r": float(result_r),
 
-        "confirmation_time":
-            state.get(
-                "confirmation_time",
-                ""
-            ),
-
-        "volume_ratio":
-            float(
-                state.get(
-                    "volume_ratio",
-                    0
-                )
-            ),
-
-        "range_width_pct":
-            float(
-                state.get(
-                    "range_width_pct",
-                    0
-                )
-            ),
-
-        "reward_r":
-            float(
-                state.get(
-                    "reward_r",
-                    0
-                )
-            ),
-
-        "tp1_hit":
-            bool(
-                state.get(
-                    "tp1_hit",
-                    False
-                )
-            ),
-
-        "tp2_hit":
-            bool(
-                state.get(
-                    "tp2_hit",
-                    False
-                )
-            ),
-
-        "sl_hit":
-            bool(
-                state.get(
-                    "sl_hit",
-                    False
-                )
-            ),
-
-        "breakeven":
-            bool(
-                state.get(
-                    "breakeven",
-                    False
-                )
-            ),
-
-        "outcome":
-            outcome,
-
-        "result_r":
-            result_r,
-
-        "exit_price":
-            exit_price,
-
-        "closed_at":
-            pd.Timestamp.now(
-                tz="UTC"
-            ).isoformat()
+        "closed_at": pd.Timestamp.now(
+            tz="UTC"
+        ).isoformat(),
     }
 
-
-    history.append(
-        trade
-    )
-
-
-    save_history(
-        history
-    )
+    history.append(trade)
+    save_history(history)
 
 
 # ============================================================
-# CREATE CHART
+# CHART
 # ============================================================
 
 def create_chart(
     df,
-    signal
+    signal,
 ):
-
     chart_df = (
-        df
-        .tail(80)
+        df.tail(60)
         .copy()
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
-
-
-    entry = float(
-        signal["entry"]
-    )
-
-
-    stop = float(
-        signal["stop"]
-    )
-
-
-    tp1 = float(
-        signal["tp1"]
-    )
-
-
-    tp2 = float(
-        signal["tp2"]
-    )
-
-
-    range_high = float(
-        signal["range_high"]
-    )
-
-
-    range_low = float(
-        signal["range_low"]
-    )
-
-
-    direction = signal[
-        "direction"
-    ]
-
 
     fig, ax = plt.subplots(
         figsize=(14, 8)
     )
 
-
-    # ========================================================
-    # CANDLES
-    # ========================================================
-
-    for i, candle in (
-        chart_df.iterrows()
-    ):
-
-        open_price = float(
-            candle["open"]
-        )
-
-        high_price = float(
-            candle["high"]
-        )
-
-        low_price = float(
-            candle["low"]
-        )
-
-        close_price = float(
-            candle["close"]
-        )
-
+    for i, candle in chart_df.iterrows():
+        o = float(candle["open"])
+        h = float(candle["high"])
+        l = float(candle["low"])
+        c = float(candle["close"])
 
         candle_color = (
-            "green"
-            if close_price >= open_price
-            else "red"
+            "green" if c >= o else "red"
         )
-
 
         ax.plot(
             [i, i],
-            [
-                low_price,
-                high_price
-            ],
+            [l, h],
             color=candle_color,
-            linewidth=1
+            linewidth=1,
         )
 
-
-        body_low = min(
-            open_price,
-            close_price
-        )
-
-
-        body_height = abs(
-            close_price
-            - open_price
-        )
-
+        body_low = min(o, c)
+        body_height = abs(c - o)
 
         if body_height == 0:
-
-            body_height = (
-                high_price
-                * 0.00001
-            )
-
+            body_height = h * 0.00001
 
         ax.bar(
             i,
             body_height,
             bottom=body_low,
             width=0.65,
-            color=candle_color
+            color=candle_color,
         )
 
-
-    # ========================================================
-    # RANGE HIGH
-    # ========================================================
-
     ax.axhline(
-        range_high,
+        signal["range_high"],
         linestyle="--",
         linewidth=2,
-        label=(
-            f"Range High "
-            f"${range_high:,.2f}"
-        )
+        label=f"Liquidity ${signal['range_high']:,.2f}",
     )
 
-
-    # ========================================================
-    # RANGE LOW
-    # ========================================================
+    ax.axhline(
+        signal["entry"],
+        linestyle="-",
+        linewidth=2,
+        label=f"Entry ${signal['entry']:,.2f}",
+    )
 
     ax.axhline(
-        range_low,
+        signal["stop"],
         linestyle="--",
         linewidth=2,
-        label=(
-            f"Range Low "
-            f"${range_low:,.2f}"
-        )
+        label=f"SL ${signal['stop']:,.2f}",
     )
 
-
-    # ========================================================
-    # ENTRY
-    # ========================================================
-
     ax.axhline(
-        entry,
-        linewidth=2,
-        label=(
-            f"Entry "
-            f"${entry:,.2f}"
-        )
-    )
-
-
-    # ========================================================
-    # STOP
-    # ========================================================
-
-    ax.axhline(
-        stop,
+        signal["tp1"],
         linestyle="--",
         linewidth=2,
-        label=(
-            f"Stop "
-            f"${stop:,.2f}"
-        )
+        label=f"TP1 ${signal['tp1']:,.2f}",
     )
-
-
-    # ========================================================
-    # TP1
-    # ========================================================
 
     ax.axhline(
-        tp1,
+        signal["tp2"],
         linestyle="--",
         linewidth=2,
-        label=(
-            f"TP1 "
-            f"${tp1:,.2f}"
-        )
+        label=f"TP2 ${signal['tp2']:,.2f}",
     )
-
-
-    # ========================================================
-    # TP2
-    # ========================================================
-
-    ax.axhline(
-        tp2,
-        linestyle="--",
-        linewidth=2,
-        label=(
-            f"TP2 "
-            f"${tp2:,.2f}"
-        )
-    )
-
-
-    # ========================================================
-    # SWEEP MARKER
-    # ========================================================
-
-    sweep_time = signal[
-        "sweep_time"
-    ]
-
-
-    matches = chart_df[
-        chart_df["time"]
-        ==
-        sweep_time
-    ]
-
-
-    if not matches.empty:
-
-        sweep_index = int(
-            matches.index[0]
-        )
-
-
-        sweep = chart_df.iloc[
-            sweep_index
-        ]
-
-
-        if direction == "BEARISH":
-
-            marker_price = float(
-                sweep["high"]
-            )
-
-        else:
-
-            marker_price = float(
-                sweep["low"]
-            )
-
-
-        ax.scatter(
-            sweep_index,
-            marker_price,
-            s=180,
-            marker="*",
-            zorder=5,
-            label="Liquidity Sweep"
-        )
-
-
-    # ========================================================
-    # TITLE
-    # ========================================================
 
     ax.set_title(
-        (
-            f"BTCUSDT 5m V4 "
-            f"Range Liquidity Sweep — "
-            f"{direction}"
-        ),
+        "XAUUSD / Gold 5m V4 Bearish Range Liquidity Sweep",
         fontsize=16,
-        fontweight="bold"
+        fontweight="bold",
     )
 
-
-    ax.set_xlabel(
-        "Candles"
-    )
-
-
-    ax.set_ylabel(
-        "Price (USDT)"
-    )
-
-
-    ax.grid(
-        True,
-        alpha=0.2
-    )
-
-
-    ax.legend(
-        loc="best",
-        fontsize=9
-    )
-
+    ax.set_xlabel("Candles")
+    ax.set_ylabel("Gold Price (USD)")
+    ax.grid(True, alpha=0.2)
+    ax.legend(loc="best", fontsize=9)
 
     plt.tight_layout()
-
-
     plt.savefig(
         CHART_FILE,
         dpi=150,
-        bbox_inches="tight"
+        bbox_inches="tight",
     )
-
-
     plt.close()
-
 
     return CHART_FILE
 
@@ -1831,1105 +730,569 @@ def create_chart(
 # CREATE PAPER TRADE
 # ============================================================
 
-def create_trade(
-    df,
-    signal,
-    previous_state
-):
+def create_trade(df, signal):
+    state = default_state()
 
-    direction = signal[
-        "direction"
-    ]
+    state.update({
+        "active": True,
 
+        "event_id": signal["event_id"],
+        "last_signal_event_id": signal["event_id"],
 
-    entry = float(
-        signal["entry"]
+        "direction": "BEARISH",
+
+        "entry": float(signal["entry"]),
+        "stop_loss": float(signal["stop"]),
+        "tp1": float(signal["tp1"]),
+        "tp2": float(signal["tp2"]),
+
+        "range_high": float(signal["range_high"]),
+        "range_low": float(signal["range_low"]),
+
+        "level": float(signal["range_high"]),
+
+        "sweep_time": str(signal["sweep_time"]),
+        "entry_time": str(signal["signal_time"]),
+        "confirmation_time": str(signal["signal_time"]),
+
+        "volume_ratio": float(signal["volume_ratio"]),
+        "range_width_pct": float(
+            signal["range_width_pct"]
+        ),
+        "planned_reward_r": float(
+            signal["planned_reward_r"]
+        ),
+    })
+
+    mark_event_processed(
+        state,
+        signal["event_id"],
     )
 
+    entry = state["entry"]
+    stop = state["stop_loss"]
+    tp1 = state["tp1"]
+    tp2 = state["tp2"]
 
-    stop = float(
-        signal["stop"]
-    )
+    risk = stop - entry
 
+    message = f"""🔴 Gold XAUUSD V4 PAPER TRADE
 
-    tp1 = float(
-        signal["tp1"]
-    )
+BEARISH RANGE LIQUIDITY SWEEP
 
-
-    tp2 = float(
-        signal["tp2"]
-    )
-
-
-    range_high = float(
-        signal["range_high"]
-    )
-
-
-    range_low = float(
-        signal["range_low"]
-    )
-
-
-    volume = float(
-        signal["volume_ratio"]
-    )
-
-
-    reward_r = float(
-        signal["reward_r"]
-    )
-
-
-    sweep_time = str(
-        signal["sweep_time"]
-    )
-
-
-    confirmation_time = str(
-        signal["signal_time"]
-    )
-
-
-    # ========================================================
-    # EVENT ID
-    # ========================================================
-
-    event_id = (
-
-        f"{sweep_time}|"
-
-        f"{confirmation_time}|"
-
-        f"{direction}|"
-
-        f"{range_high:.2f}|"
-
-        f"{range_low:.2f}"
-    )
-
-
-    # ========================================================
-    # STATE
-    # ========================================================
-
-    state = {
-
-        "active":
-            True,
-
-        "last_heartbeat":
-            previous_state.get(
-                "last_heartbeat",
-                ""
-            ),
-
-        "last_processed_event_id":
-            event_id,
-
-        "event_id":
-            event_id,
-
-        "direction":
-            direction,
-
-        "entry":
-            entry,
-
-        "stop_loss":
-            stop,
-
-        "original_stop_loss":
-            stop,
-
-        "tp1":
-            tp1,
-
-        "tp2":
-            tp2,
-
-        # Keep the range high as the reference
-        # level for bearish and range low for bullish.
-
-        "level":
-            (
-                range_high
-                if direction == "BEARISH"
-                else range_low
-            ),
-
-        "range_high":
-            range_high,
-
-        "range_low":
-            range_low,
-
-        "sweep_time":
-            sweep_time,
-
-        "confirmation_time":
-            confirmation_time,
-
-        "volume_ratio":
-            volume,
-
-        "range_width_pct":
-            float(
-                signal[
-                    "range_width_pct"
-                ]
-            ),
-
-        "reward_r":
-            reward_r,
-
-        "tp1_hit":
-            False,
-
-        "tp2_hit":
-            False,
-
-        "sl_hit":
-            False,
-
-        "breakeven":
-            False,
-
-        "bars_in_trade":
-            0
-    }
-
-
-    emoji = (
-        "🔴"
-        if direction == "BEARISH"
-        else "🟢"
-    )
-
-
-    # ========================================================
-    # TELEGRAM SETUP MESSAGE
-    # ========================================================
-
-    message = f"""
-{emoji} BTC V4 PAPER SETUP
-
-Strategy:
-Range Liquidity Sweep
-
-Direction:
-{direction}
-
-━━━━━━━━━━━━━━━━━━
-
-📦 RANGE
-
-High:
-${range_high:,.2f}
-
-Low:
-${range_low:,.2f}
-
-Range width:
-{signal["range_width_pct"] * 100:.2f}%
-
-━━━━━━━━━━━━━━━━━━
-
-💧 LIQUIDITY SWEEP
+Liquidity:
+${signal['range_high']:,.2f}
 
 Sweep:
-{sweep_time}
-
-Volume:
-{volume:.2f}x average
+{signal['sweep_time']}
 
 Confirmation:
-{confirmation_time}
+{signal['signal_time']}
+
+Sweep volume:
+{signal['volume_ratio']:.2f}x average
+
+Range width:
+{signal['range_width_pct'] * 100:.3f}%
 
 ━━━━━━━━━━━━━━━━━━
 
 📍 ENTRY
-
 ${entry:,.2f}
 
 🛑 STOP LOSS
-
 ${stop:,.2f}
 
 🎯 TP1
-
 ${tp1:,.2f}
 
 🎯 TP2
-
 ${tp2:,.2f}
 
 Planned reward:
-{reward_r:.2f}R
+{signal['planned_reward_r']:.2f}R
 
 ━━━━━━━━━━━━━━━━━━
 
-🤖 PAPER TRADE
+V4 MANAGEMENT
 
-Position model:
-
-50% → TP1
-50% → TP2
+TP1:
+50% position at +1R
 
 After TP1:
-SL → breakeven
+Stop moves to breakeven
 
-━━━━━━━━━━━━━━━━━━
+TP2:
+Remaining 50% at target
 
-⚠️ MANUAL TRADE ONLY
-
-No real order has been placed.
+⚠️ PAPER TRADING ONLY
 """
 
+    telegram(message)
 
-    # ========================================================
-    # CHART
-    # ========================================================
-
-    chart_file = create_chart(
+    chart = create_chart(
         df,
-        signal
+        signal,
     )
-
-
-    telegram(
-        message
-    )
-
-
-    caption = (
-        f"{emoji} BTC V4 "
-        f"{direction} PAPER SETUP\n\n"
-
-        f"Entry: "
-        f"${entry:,.2f}\n"
-
-        f"SL: "
-        f"${stop:,.2f}\n"
-
-        f"TP1: "
-        f"${tp1:,.2f}\n"
-
-        f"TP2: "
-        f"${tp2:,.2f}\n\n"
-
-        f"Volume: "
-        f"{volume:.2f}x\n"
-
-        f"Range: "
-        f"{signal['range_width_pct'] * 100:.2f}%\n\n"
-
-        f"🤖 V4 paper tracker active"
-    )
-
 
     send_chart(
-        chart_file,
-        caption
+        chart,
+        (
+            f"🔴 Gold XAUUSD V4 BEARISH PAPER SETUP\n\n"
+            f"Entry: ${entry:,.2f}\n"
+            f"SL: ${stop:,.2f}\n"
+            f"TP1: ${tp1:,.2f}\n"
+            f"TP2: ${tp2:,.2f}\n\n"
+            f"Volume: {signal['volume_ratio']:.2f}x\n"
+            f"Planned: {signal['planned_reward_r']:.2f}R\n"
+            f"⚠️ Paper trading only"
+        ),
     )
-
 
     return state
 
 
 # ============================================================
-# MONITOR ACTIVE PAPER TRADE
+# MONITOR V4 PAPER TRADE
 # ============================================================
 
-def monitor_trade(
-    df,
-    state
-):
-
-    if not state.get(
-        "active"
-    ):
-
+def monitor_trade(df, state):
+    if not state.get("active"):
         return False
 
+    if len(df) < 2:
+        return False
 
-    direction = state[
-        "direction"
-    ]
+    candle = df.iloc[-1]
 
+    high = float(candle["high"])
+    low = float(candle["low"])
+    close = float(candle["close"])
 
-    entry = float(
-        state["entry"]
-    )
+    entry = float(state["entry"])
+    original_stop = float(state["stop_loss"])
+    tp1 = float(state["tp1"])
+    tp2 = float(state["tp2"])
 
-
-    original_stop = float(
-        state[
-            "original_stop_loss"
-        ]
-    )
-
-
-    current_stop = float(
-        state[
-            "stop_loss"
-        ]
-    )
-
-
-    tp1 = float(
-        state["tp1"]
-    )
-
-
-    tp2 = float(
-        state["tp2"]
-    )
-
+    changed = False
 
     # --------------------------------------------------------
-    # Only latest completed candle.
+    # V4 uses bearish trades only.
+    #
+    # Conservative same-candle ordering:
+    # check current stop BEFORE targets.
+    # This matches the V4 backtest.
     # --------------------------------------------------------
 
-    candle = df.iloc[
-        -1
-    ]
-
-
-    high = float(
-        candle["high"]
+    current_stop = (
+        entry
+        if state.get("breakeven", False)
+        else original_stop
     )
 
+    if high >= current_stop:
+        if state.get("tp1_hit", False):
+            result_r = float(
+                state.get("partial_realized_r", 0)
+            )
 
-    low = float(
-        candle["low"]
-    )
+            state["active"] = False
+            state["breakeven"] = True
 
+            record_completed_trade(
+                state,
+                "TP1_BE",
+                result_r,
+            )
 
-    close = float(
-        candle["close"]
-    )
+            telegram(
+                f"""🟡 Gold XAUUSD V4 PAPER TRADE CLOSED
 
+BEARISH setup
 
-    state[
-        "bars_in_trade"
-    ] = int(
-        state.get(
-            "bars_in_trade",
-            0
+🔒 TP1 → BREAKEVEN
+
+TP1 was already secured.
+
+Realized result:
+{result_r:+.2f}R
+
+Entry:
+${entry:,.2f}
+
+The remaining position returned
+to breakeven.
+
+Trade is CLOSED.
+No further alerts will be sent
+for this signal.
+"""
+            )
+
+            mark_event_processed(
+                state,
+                state["event_id"],
+            )
+
+            changed = True
+            return changed
+
+        state["sl_hit"] = True
+        state["active"] = False
+
+        record_completed_trade(
+            state,
+            "SL",
+            -1.0,
         )
-    ) + 1
-
-
-    changed = True
-
-
-    # ========================================================
-    # BULLISH
-    # ========================================================
-
-    if direction == "BULLISH":
-
-        # ----------------------------------------------------
-        # STOP
-        # ----------------------------------------------------
-
-        if low <= current_stop:
-
-            if state.get(
-                "breakeven",
-                False
-            ):
-
-                telegram(
-                    f"""
-🟡 BTC V4 PAPER TRADE
-
-BULLISH
-
-TP1 was already hit.
-
-Price returned to entry.
-
-⚖️ BREAKEVEN EXIT
-
-Entry:
-${entry:,.2f}
-
-Exit:
-${entry:,.2f}
-
-Result:
-+{TP1_PARTIAL * TP1_R:.1f}R
-
-Paper trade closed.
-"""
-                )
-
-
-                record_completed_trade(
-                    state,
-                    "TP1_BE",
-                    entry
-                )
-
-            else:
-
-                telegram(
-                    f"""
-🔴 BTC V4 PAPER TRADE
-
-BULLISH
-
-🛑 STOP LOSS HIT
-
-Entry:
-${entry:,.2f}
-
-Stop:
-${current_stop:,.2f}
-
-TP1:
-${tp1:,.2f}
-
-TP2:
-${tp2:,.2f}
-
-Result:
--1R
-
-Paper trade closed.
-"""
-                )
-
-
-                state[
-                    "sl_hit"
-                ] = True
-
-
-                record_completed_trade(
-                    state,
-                    "SL",
-                    current_stop
-                )
-
-
-            state[
-                "active"
-            ] = False
-
-
-            return True
-
-
-        # ----------------------------------------------------
-        # TP1
-        # ----------------------------------------------------
-
-        if (
-            not state[
-                "tp1_hit"
-            ]
-            and
-            high >= tp1
-        ):
-
-            state[
-                "tp1_hit"
-            ] = True
-
-
-            if MOVE_SL_TO_BREAKEVEN:
-
-                state[
-                    "stop_loss"
-                ] = entry
-
-                state[
-                    "breakeven"
-                ] = True
-
-
-            telegram(
-                f"""
-🟢 BTC V4 PAPER TRADE
-
-BULLISH
-
-🎯 TP1 HIT
-
-Entry:
-${entry:,.2f}
-
-TP1:
-${tp1:,.2f}
-
-TP2:
-${tp2:,.2f}
-
-50% position:
-+1R
-
-Remaining:
-50%
-
-🛡️ Stop moved to breakeven.
-
-Paper trade remains active.
-"""
-            )
-
-
-            save_state(
-                state
-            )
-
-
-        # ----------------------------------------------------
-        # TP2
-        # ----------------------------------------------------
-
-        if (
-            not state[
-                "tp2_hit"
-            ]
-            and
-            low < tp2 + (
-                tp2 * 0.0000001
-            )
-            and
-            high >= tp2
-        ):
-
-            # This branch is intentionally
-            # replaced below for direction handling.
-            pass
-
-
-        if (
-            not state[
-                "tp2_hit"
-            ]
-            and
-            high >= tp2
-        ):
-
-            state[
-                "tp2_hit"
-            ] = True
-
-
-            telegram(
-                f"""
-🟢 BTC V4 PAPER TRADE
-
-BULLISH
-
-🎯🎯 TP2 HIT
-
-Entry:
-${entry:,.2f}
-
-TP1:
-${tp1:,.2f}
-
-TP2:
-${tp2:,.2f}
-
-50% at TP1:
-+0.5R
-
-50% at TP2:
-+1.0R
-
-Total:
-+1.5R
-
-Paper trade complete.
-"""
-            )
-
-
-            record_completed_trade(
-                state,
-                "TP2",
-                tp2
-            )
-
-
-            state[
-                "active"
-            ] = False
-
-
-            return True
-
-
-    # ========================================================
-    # BEARISH
-    # ========================================================
-
-    else:
-
-        # ----------------------------------------------------
-        # STOP
-        # ----------------------------------------------------
-
-        if high >= current_stop:
-
-            if state.get(
-                "breakeven",
-                False
-            ):
-
-                telegram(
-                    f"""
-🟡 BTC V4 PAPER TRADE
-
-BEARISH
-
-TP1 was already hit.
-
-Price returned to entry.
-
-⚖️ BREAKEVEN EXIT
-
-Entry:
-${entry:,.2f}
-
-Exit:
-${entry:,.2f}
-
-Result:
-+{TP1_PARTIAL * TP1_R:.1f}R
-
-Paper trade closed.
-"""
-                )
-
-
-                record_completed_trade(
-                    state,
-                    "TP1_BE",
-                    entry
-                )
-
-            else:
-
-                telegram(
-                    f"""
-🔴 BTC V4 PAPER TRADE
-
-BEARISH
-
-🛑 STOP LOSS HIT
-
-Entry:
-${entry:,.2f}
-
-Stop:
-${current_stop:,.2f}
-
-TP1:
-${tp1:,.2f}
-
-TP2:
-${tp2:,.2f}
-
-Result:
--1R
-
-Paper trade closed.
-"""
-                )
-
-
-                state[
-                    "sl_hit"
-                ] = True
-
-
-                record_completed_trade(
-                    state,
-                    "SL",
-                    current_stop
-                )
-
-
-            state[
-                "active"
-            ] = False
-
-
-            return True
-
-
-        # ----------------------------------------------------
-        # TP1
-        # ----------------------------------------------------
-
-        if (
-            not state[
-                "tp1_hit"
-            ]
-            and
-            low <= tp1
-        ):
-
-            state[
-                "tp1_hit"
-            ] = True
-
-
-            if MOVE_SL_TO_BREAKEVEN:
-
-                state[
-                    "stop_loss"
-                ] = entry
-
-                state[
-                    "breakeven"
-                ] = True
-
-
-            telegram(
-                f"""
-🔴 BTC V4 PAPER TRADE
-
-BEARISH
-
-🎯 TP1 HIT
-
-Entry:
-${entry:,.2f}
-
-TP1:
-${tp1:,.2f}
-
-TP2:
-${tp2:,.2f}
-
-50% position:
-+1R
-
-Remaining:
-50%
-
-🛡️ Stop moved to breakeven.
-
-Paper trade remains active.
-"""
-            )
-
-
-            save_state(
-                state
-            )
-
-
-        # ----------------------------------------------------
-        # TP2
-        # ----------------------------------------------------
-
-        if (
-            not state[
-                "tp2_hit"
-            ]
-            and
-            low <= tp2
-        ):
-
-            state[
-                "tp2_hit"
-            ] = True
-
-
-            telegram(
-                f"""
-🔴 BTC V4 PAPER TRADE
-
-BEARISH
-
-🎯🎯 TP2 HIT
-
-Entry:
-${entry:,.2f}
-
-TP1:
-${tp1:,.2f}
-
-TP2:
-${tp2:,.2f}
-
-50% at TP1:
-+0.5R
-
-50% at TP2:
-+1.0R
-
-Total:
-+1.5R
-
-Paper trade complete.
-"""
-            )
-
-
-            record_completed_trade(
-                state,
-                "TP2",
-                tp2
-            )
-
-
-            state[
-                "active"
-            ] = False
-
-
-            return True
-
-
-    # ========================================================
-    # TIME EXIT
-    # ========================================================
-
-    if (
-        state[
-            "bars_in_trade"
-        ]
-        >= MAX_BARS_IN_TRADE
-    ):
 
         telegram(
-            f"""
-🟡 BTC V4 PAPER TRADE
+            f"""🔴 Gold XAUUSD V4 PAPER TRADE CLOSED
 
-TIME EXIT
+BEARISH setup
 
-Direction:
-{direction}
+🛑 FULL STOP LOSS
 
 Entry:
 ${entry:,.2f}
 
-Current price:
-${close:,.2f}
+Stop:
+${original_stop:,.2f}
 
-Trade duration:
-{state["bars_in_trade"]} candles
+Result:
+-1.00R
 
-The maximum trade duration
-has been reached.
-
-Paper trade closed.
+Trade is CLOSED.
+No further alerts will be sent
+for this signal.
 """
         )
 
+        mark_event_processed(
+            state,
+            state["event_id"],
+        )
+
+        changed = True
+        return changed
+
+    # --------------------------------------------------------
+    # TP1
+    # --------------------------------------------------------
+
+    if (
+        not state.get("tp1_hit", False)
+        and low <= tp1
+    ):
+        state["tp1_hit"] = True
+        state["partial_realized_r"] = (
+            TP1_PARTIAL * TP1_R
+        )
+
+        if MOVE_SL_TO_BREAKEVEN:
+            state["breakeven"] = True
+
+        telegram(
+            f"""🟡 Gold XAUUSD V4 PAPER TRADE UPDATE
+
+BEARISH setup
+
+🎯 TP1 HIT
+
+Entry:
+${entry:,.2f}
+
+TP1:
+${tp1:,.2f}
+
+50% position:
++1R
+
+Realized:
++{state['partial_realized_r']:.2f}R
+
+Remaining 50%:
+Still active
+
+🔒 Stop moved to breakeven.
+
+TP2:
+${tp2:,.2f}
+"""
+        )
+
+        changed = True
+
+    # --------------------------------------------------------
+    # TP2
+    # --------------------------------------------------------
+
+    if (
+        not state.get("tp2_hit", False)
+        and low <= tp2
+    ):
+        state["tp2_hit"] = True
+        state["active"] = False
+
+        remaining_fraction = (
+            1.0 - TP1_PARTIAL
+        )
+
+        remaining_r = (
+            remaining_fraction * TP2_R
+        )
+
+        result_r = (
+            float(
+                state.get(
+                    "partial_realized_r",
+                    0,
+                )
+            )
+            + remaining_r
+        )
+
+        record_completed_trade(
+            state,
+            "TP2",
+            result_r,
+        )
+
+        telegram(
+            f"""🟢 Gold XAUUSD V4 PAPER TRADE CLOSED
+
+BEARISH setup
+
+🎯🎯 TP2 HIT
+
+Entry:
+${entry:,.2f}
+
+TP1:
+${tp1:,.2f}
+
+TP2:
+${tp2:,.2f}
+
+Result:
++{result_r:.2f}R
+
+Trade is CLOSED.
+No further alerts will be sent
+for this signal.
+"""
+        )
+
+        mark_event_processed(
+            state,
+            state["event_id"],
+        )
+
+        changed = True
+        return changed
+
+    # --------------------------------------------------------
+    # TIME EXIT
+    # --------------------------------------------------------
+
+    try:
+        entry_time = pd.to_datetime(
+            state["entry_time"],
+            utc=True,
+        )
+
+        current_time = candle["time"]
+
+        bars_held = int(
+            (
+                current_time - entry_time
+            ).total_seconds()
+            // (5 * 60)
+        )
+
+    except Exception:
+        bars_held = 0
+
+    if bars_held >= MAX_BARS_IN_TRADE:
+        risk = original_stop - entry
+
+        if risk <= 0:
+            result_r = 0.0
+
+        elif state.get("tp1_hit", False):
+            remaining_fraction = (
+                1.0 - TP1_PARTIAL
+            )
+
+            remaining_r = (
+                remaining_fraction
+                * (entry - close)
+                / risk
+            )
+
+            result_r = (
+                float(
+                    state.get(
+                        "partial_realized_r",
+                        0,
+                    )
+                )
+                + remaining_r
+            )
+
+        else:
+            result_r = (
+                entry - close
+            ) / risk
+
+        state["active"] = False
 
         record_completed_trade(
             state,
             "TIME",
-            close
+            result_r,
         )
 
+        telegram(
+            f"""🟡 Gold XAUUSD V4 PAPER TRADE CLOSED
 
-        state[
-            "active"
-        ] = False
+BEARISH setup
 
+⏱ TIME EXIT
 
-        return True
+Held:
+{bars_held} candles
 
+Entry:
+${entry:,.2f}
+
+Current close:
+${close:,.2f}
+
+Result:
+{result_r:+.2f}R
+
+Trade is CLOSED.
+No further alerts will be sent
+for this signal.
+"""
+        )
+
+        mark_event_processed(
+            state,
+            state["event_id"],
+        )
+
+        changed = True
 
     return changed
 
 
 # ============================================================
-# EOD REPORT
+# DAILY REPORT
 # ============================================================
 
 def send_eod_report():
-
     history = load_history()
 
+    now = pd.Timestamp.now(tz="UTC")
+    today = now.strftime("%Y-%m-%d")
 
-    now = pd.Timestamp.now(
-        tz="UTC"
-    )
-
-
-    today = now.strftime(
-        "%Y-%m-%d"
-    )
-
-
-    today_trades = []
-
+    trades = []
 
     for trade in history:
-
-        closed_at = trade.get(
-            "closed_at",
-            ""
-        )
-
+        closed_at = trade.get("closed_at", "")
 
         if not closed_at:
-
             continue
-
 
         try:
-
             date = pd.to_datetime(
                 closed_at,
-                utc=True
-            ).strftime(
-                "%Y-%m-%d"
-            )
+                utc=True,
+            ).strftime("%Y-%m-%d")
 
         except Exception:
-
             continue
 
-
         if date == today:
+            trades.append(trade)
 
-            today_trades.append(
-                trade
-            )
-
-
-    total = len(
-        today_trades
-    )
-
-
-    wins = sum(
-        1
-        for t in today_trades
-        if float(
-            t.get(
-                "result_r",
-                0
-            )
-        ) > 0
-    )
-
-
-    losses = sum(
-        1
-        for t in today_trades
-        if float(
-            t.get(
-                "result_r",
-                0
-            )
-        ) < 0
-    )
-
-
-    total_r = sum(
-        float(
-            t.get(
-                "result_r",
-                0
-            )
-        )
-        for t in today_trades
-    )
-
-
-    tp1_hits = sum(
-        1
-        for t in today_trades
-        if t.get(
-            "tp1_hit",
-            False
-        )
-    )
-
-
-    tp2_hits = sum(
-        1
-        for t in today_trades
-        if t.get(
-            "tp2_hit",
-            False
-        )
-    )
-
-
-    sl_hits = sum(
-        1
-        for t in today_trades
-        if t.get(
-            "sl_hit",
-            False
-        )
-    )
-
-
-    if total:
-
-        win_rate = (
-            wins
-            / total
-            * 100
-        )
-
-    else:
-
-        win_rate = 0
-
+    total = len(trades)
 
     if total == 0:
+        telegram(
+            f"""📊 Gold XAUUSD V4 DAILY PAPER REPORT
 
-        report = f"""
-📊 BTC V4 DAILY PAPER REPORT
+Date: {today}
 
-Date:
-{today}
-
-No completed trades today.
-
-━━━━━━━━━━━━━━━━━━
-
-Strategy:
-V4 Range Liquidity Sweep
+No completed V4 paper trades today.
 
 Market:
-BTCUSDT
+{SYMBOL}
 
 Timeframe:
-5m
+{INTERVAL}
 
 Status:
 🟢 Monitor active
 
-⚠️ Paper trading only
+⚠️ PAPER TRADING ONLY
 """
+        )
+        return
 
-    else:
+    total_r = sum(
+        float(t.get("result_r", 0))
+        for t in trades
+    )
 
-        report = f"""
-📊 BTC V4 DAILY PAPER REPORT
+    profitable = sum(
+        1 for t in trades
+        if float(t.get("result_r", 0)) > 0
+    )
 
-Date:
-{today}
+    losses = sum(
+        1 for t in trades
+        if float(t.get("result_r", 0)) < 0
+    )
+
+    tp2 = sum(
+        1 for t in trades
+        if t.get("outcome") == "TP2"
+    )
+
+    sl = sum(
+        1 for t in trades
+        if t.get("outcome") == "SL"
+    )
+
+    tp1_be = sum(
+        1 for t in trades
+        if t.get("outcome") == "TP1_BE"
+    )
+
+    time_exits = sum(
+        1 for t in trades
+        if t.get("outcome") == "TIME"
+    )
+
+    win_rate = (
+        profitable / total * 100
+    )
+
+    telegram(
+        f"""📊 Gold XAUUSD V4 DAILY PAPER REPORT
+
+Date: {today}
 
 ━━━━━━━━━━━━━━━━━━
-
-📈 PERFORMANCE
 
 Completed trades:
 {total}
 
 Profitable:
-{wins}
+{profitable}
 
 Losing:
 {losses}
@@ -2939,44 +1302,34 @@ Win rate:
 
 ━━━━━━━━━━━━━━━━━━
 
-🎯 TARGETS
+🎯 TP2:
+{tp2}
 
-TP1 hits:
-{tp1_hits}
+🟡 TP1 → BE:
+{tp1_be}
 
-TP2 hits:
-{tp2_hits}
+🛑 Full SL:
+{sl}
 
-🛑 Stop losses:
-{sl_hits}
+⏱ Time exits:
+{time_exits}
 
 ━━━━━━━━━━━━━━━━━━
 
-📊 RESULT
-
-Total:
+Total result:
 {total_r:+.2f}R
 
-Average:
-{total_r / total:+.3f}R
-
-━━━━━━━━━━━━━━━━━━
-
-Strategy:
-V4 Range Liquidity Sweep
-
 Market:
-BTCUSDT
+{SYMBOL}
 
 Timeframe:
-5m
+{INTERVAL}
 
-🤖 PAPER TRADING ONLY
+Strategy:
+V4 Bearish Range Liquidity Sweep
+
+⚠️ PAPER TRADING ONLY
 """
-
-
-    telegram(
-        report
     )
 
 
@@ -2985,230 +1338,133 @@ Timeframe:
 # ============================================================
 
 def main():
-
-    # ========================================================
-    # EOD
-    # ========================================================
-
-    if (
-        len(sys.argv) > 1
-        and
-        sys.argv[1].lower()
-        == "--eod"
-    ):
-
-        send_eod_report()
-
-        return
-
-
-    print(
-        "BTC V4 Liquidity Bot started"
-    )
-
-
-    # ========================================================
-    # DATA
-    # ========================================================
-
-    df = get_data()
-
-
-    print(
-        f"Loaded {len(df)} completed candles."
-    )
-
-
-    if len(df) < 50:
-
-        print(
-            "Not enough completed candles."
-        )
-
-        return
-
-
-    # ========================================================
-    # STATE
-    # ========================================================
+    print("Gold XAUUSD V4 Liquidity Bot started")
 
     state = load_state()
 
+    # --------------------------------------------------------
+    # EOD MODE
+    # --------------------------------------------------------
 
-    # ========================================================
+    import sys
+
+    if (
+        len(sys.argv) > 1
+        and sys.argv[1].lower() == "--eod"
+    ):
+        send_eod_report()
+        return
+
+    # --------------------------------------------------------
+    # DATA
+    # --------------------------------------------------------
+
+    df = get_data()
+
+    print(
+        f"Loaded {len(df)} completed candles"
+    )
+
+    if len(df) < RANGE_CANDLES + VOLUME_LOOKBACK + 2:
+        print("Not enough data.")
+        save_state(state)
+        return
+
+    # --------------------------------------------------------
     # HEARTBEAT
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
-
-        if send_heartbeat(
-            state
-        ):
-
-            save_state(
-                state
-            )
-
-            print(
-                "Heartbeat sent."
-            )
-
-    except Exception as e:
-
+        if send_heartbeat(state):
+            save_state(state)
+            print("Heartbeat sent.")
+    except Exception as exc:
         print(
             "Heartbeat error:",
-            str(e)
+            str(exc),
         )
 
+    # --------------------------------------------------------
+    # ACTIVE TRADE
+    # --------------------------------------------------------
 
-    # ========================================================
-    # ACTIVE PAPER TRADE
-    # ========================================================
-
-    if state.get(
-        "active"
-    ):
-
-        print(
-            "Active V4 paper trade found."
-        )
-
+    if state.get("active"):
+        print("Active V4 paper trade found.")
 
         changed = monitor_trade(
             df,
-            state
+            state,
         )
-
 
         if changed:
-
-            save_state(
-                state
-            )
-
-            print(
-                "Paper trade state updated."
-            )
+            save_state(state)
+            print("Trade state updated.")
 
         else:
+            print("Trade remains active.")
 
-            print(
-                "Active paper trade remains open."
-            )
-
-
-        # Never search for another setup
-        # while one is active.
-
+        # Never create a second trade while active.
         return
 
+    # --------------------------------------------------------
+    # NEW SIGNAL
+    # --------------------------------------------------------
 
-    # ========================================================
-    # FIND NEW V4 SIGNAL
-    # ========================================================
-
-    signal = analyze(
-        df
-    )
-
+    signal = find_v4_signal(df)
 
     if signal is None:
-
-        print(
-            "No new confirmed V4 setup."
-        )
-
+        print("No new V4 signal.")
         return
 
+    event_id = signal["event_id"]
 
-    print(
-        "V4 signal detected:",
-        signal["direction"],
-        signal["signal_time"]
-    )
-
-
-    # ========================================================
-    # EVENT ID
-    # ========================================================
-
-    event_id = (
-
-        f"{signal['sweep_time']}|"
-
-        f"{signal['signal_time']}|"
-
-        f"{signal['direction']}|"
-
-        f"{float(signal['range_high']):.2f}|"
-
-        f"{float(signal['range_low']):.2f}"
-    )
-
-
-    print(
-        "Event ID:",
-        event_id
-    )
-
-
-    # ========================================================
-    # DUPLICATE PROTECTION
-    # ========================================================
-
+    # This is the critical duplicate-alert protection.
+    #
+    # A completed signal can remain detectable on subsequent
+    # 5-minute GitHub Actions runs. Once processed, it is never
+    # alerted again.
     if event_already_processed(
+        state,
         event_id,
-        state
     ):
-
         print(
-            "V4 signal already processed."
-        )
-
-        print(
+            "Signal already processed. "
             "No duplicate alert."
         )
-
         return
 
+    # Extra protection against the immediately previous signal.
+    if (
+        state.get("last_signal_event_id")
+        == event_id
+    ):
+        mark_event_processed(
+            state,
+            event_id,
+        )
+        save_state(state)
 
-    # ========================================================
-    # CREATE TRADE
-    # ========================================================
+        print(
+            "Duplicate signal ID ignored."
+        )
+        return
+
+    print(
+        "NEW V4 BEARISH SIGNAL:",
+        event_id,
+    )
 
     new_state = create_trade(
         df,
         signal,
-        state
     )
 
-
-    # ========================================================
-    # SAVE
-    # ========================================================
-
-    save_state(
-        new_state
-    )
-
+    save_state(new_state)
 
     print(
         "V4 paper trade created."
     )
 
-    print(
-        "Telegram alert sent."
-    )
-
-    print(
-        "Trade state saved."
-    )
-
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
-
     main()
