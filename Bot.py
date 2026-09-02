@@ -55,6 +55,7 @@ STATE_FILE = "xauusd_trade_state.json"
 HISTORY_FILE = "xauusd_trade_history.json"
 CHART_FILE = "xauusd_v4_liquidity_setup.png"
 
+HEARTBEAT_ENABLED = False
 HEARTBEAT_MINUTES = 60
 MAX_PROCESSED_EVENTS = 200
 
@@ -209,6 +210,9 @@ def event_already_processed(state, event_id):
 # ============================================================
 
 def send_heartbeat(state):
+    if not HEARTBEAT_ENABLED:
+        return False
+
     now = pd.Timestamp.now(tz="UTC")
 
     previous_text = state.get("last_heartbeat", "")
@@ -1373,16 +1377,20 @@ def main():
     # --------------------------------------------------------
     # HEARTBEAT
     # --------------------------------------------------------
-
-    try:
-        if send_heartbeat(state):
-            save_state(state)
-            print("Heartbeat sent.")
-    except Exception as exc:
-        print(
-            "Heartbeat error:",
-            str(exc),
-        )
+    # Disabled by default for GitHub Actions because each run uses
+    # a fresh runner. Trade alerts remain enabled.
+    if HEARTBEAT_ENABLED:
+        try:
+            if send_heartbeat(state):
+                save_state(state)
+                print("Heartbeat sent.")
+        except Exception as exc:
+            print(
+                "Heartbeat error:",
+                str(exc),
+            )
+    else:
+        print("Heartbeat Telegram alert disabled.")
 
     # --------------------------------------------------------
     # ACTIVE TRADE
