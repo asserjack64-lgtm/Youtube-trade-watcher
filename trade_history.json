@@ -93,5 +93,31 @@
     "outcome": "SL",
     "result_r": -1,
     "closed_at": "2026-08-28T14:57:15.332986+00:00"
+  },
+  {
+    "event_id": "2026-09-01 23:45:00+00:00|2026-09-01 23:50:00+00:00|BEARISH|77591.82|77030.00",
+    "symbol": "BTCUSDT",
+    "strategy": "V4_RANGE_LIQUIDITY",
+    "direction": "BEARISH",
+    "entry": 77472.48,
+    "stop_loss": 77676.99908999998,
+    "tp1": 77267.96091000001,
+    "tp2": 77063.44182000002,
+    "level": 77591.82,
+    "range_high": 77591.82,
+    "range_low": 77030.0,
+    "sweep_time": "2026-09-01 23:45:00+00:00",
+    "confirmation_time": "2026-09-01 23:50:00+00:00",
+    "volume_ratio": 2.6218892351739127,
+    "range_width_pct": 0.007267020915935499,
+    "reward_r": 2.0,
+    "tp1_hit": true,
+    "tp2_hit": true,
+    "sl_hit": false,
+    "breakeven": true,
+    "outcome": "TP2",
+    "result_r": 1.5,
+    "exit_price": 77063.44182000002,
+    "closed_at": "2026-09-02T01:42:16.353100+00:00"
   }
 ]
